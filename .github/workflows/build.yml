@@ -35,7 +35,7 @@ jobs:
         with:
           repository: Vyaptek/hms_webapp
           token: ${{ secrets.REPO_ACCESS_TOKEN }}
-          path: frontend-src
+          path: frontend-src\hms_webapp\hms_frontend
           
       - name: Resolve version
         id: ver
