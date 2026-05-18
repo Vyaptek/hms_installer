@@ -114,10 +114,15 @@ jobs:
 
       - name: Compile installer
         run: |
+          # Dynamically locate the exact path to hms.iss
+          $issFile = (Get-ChildItem -Path "installer-repo" -Filter "hms.iss" -Recurse).FullName
+          Write-Host "Found Inno Setup script at: $issFile"
+          
+          # Run the compiler using the discovered path
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             /DAppVersion="${{ steps.ver.outputs.VERSION }}" `
             /O"output" `
-            installer-repo\installer\hms.iss
+            "$issFile"
 
       # ── Publish to GitHub Releases ────────────────────────────────────────
 
@@ -126,5 +131,5 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.VERSION }}
           name: "Vyaptek HMS ${{ steps.ver.outputs.VERSION }}"
-          files: output\HMSSetup.exe
+          files: output\HMSSetup.exe  # Double check this matches your current file configuration
           generate_release_notes: true
