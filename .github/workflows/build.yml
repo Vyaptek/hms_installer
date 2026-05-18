@@ -66,8 +66,8 @@ jobs:
           node-version: '20'
 
       - name: Build frontend
-        working-directory: frontend-src/hms_webapp/hms_frontend
         run: |
+          cd frontend-src/hms_webapp/hms_frontend
           npm ci
           npm run build
         env:
