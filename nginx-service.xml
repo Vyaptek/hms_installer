@@ -1,0 +1,11 @@
+<service>
+  <id>NginxWebProxy</id>
+  <name>Vyaptek HMS Web Proxy (Nginx)</name>
+  <description>Serves the Vyaptek React frontend and proxies backend API traffic.</description>
+  <workingdirectory>%BASE%\nginx</workingdirectory>
+  <executable>%BASE%\nginx\nginx.exe</executable>
+  <logpath>%BASE%\nginx\logs</logpath>
+  <log mode="roll"></log>
+  <stopexecutable>%BASE%\nginx\nginx.exe</stopexecutable>
+  <stoparguments>-s stop</stoparguments>
+</service>
