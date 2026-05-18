@@ -35,7 +35,7 @@ jobs:
         with:
           repository: Vyaptek/hms_webapp
           token: ${{ secrets.REPO_ACCESS_TOKEN }}
-          path: frontend-src\hms_webapp\hms_frontend
+          path: frontend-src
           
       - name: Resolve version
         id: ver
@@ -55,7 +55,10 @@ jobs:
 
       - name: Build frontend
         run: |
-          cd frontend-src\hms_webapp\hms_frontend
+          # Dynamically locate the folder containing package.json
+          $targetDir = (Get-ChildItem -Path "frontend-src" -Filter "package.json" -Recurse).DirectoryName
+          Write-Host "Navigating to: $targetDir"
+          Set-Location $targetDir
           npm ci
           npm run build
         env:
