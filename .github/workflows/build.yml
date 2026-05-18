@@ -1,0 +1,124 @@
+name: Build HMS Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. v1.0.2)'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # ── Checkout all three repos ──────────────────────────────────────────
+
+      - name: Checkout installer repo
+        uses: actions/checkout@v4
+        with:
+          path: installer-repo
+
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          repository: Vyaptek/hospital_management_backend
+          token: ${{ secrets.REPO_ACCESS_TOKEN }}
+          path: backend-src
+
+      - name: Checkout frontend
+        uses: actions/checkout@v4
+        with:
+          repository: Vyaptek/hms_webapp
+          token: ${{ secrets.REPO_ACCESS_TOKEN }}
+          path: frontend-src
+          
+      - name: Resolve version
+        id: ver
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            echo "VERSION=${{ inputs.version }}" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "VERSION=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
+          }
+
+      # ── Build backend JAR ─────────────────────────────────────────────────
+
+      - name: Set up Java 17 (build only)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Build backend JAR
+        working-directory: backend-src
+        run: ./gradlew bootJar --no-daemon
+
+      # ── Build frontend dist ───────────────────────────────────────────────
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: frontend-src/hms_webapp/hms_frontend
+        run: |
+          npm ci
+          npm run build
+        env:
+          VITE_API_BASE_URL: /api
+
+      # ── Download large binaries from binaries-stable release ─────────────
+
+      - name: Download bundled binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download binaries-stable --dir deps `
+            --repo ${{ github.repository }}
+
+      # ── Assemble staging directory ────────────────────────────────────────
+
+      - name: Assemble staging
+        run: |
+          $stage = "installer-repo\installer"
+
+          # Large binaries
+          Copy-Item deps\java.msi $stage\
+          Copy-Item deps\pg.exe   $stage\
+
+          # Backend JAR (find the built jar regardless of version suffix)
+          $jar = Get-ChildItem backend-src\build\libs\*.jar | Select-Object -First 1
+          New-Item -ItemType Directory -Force "$stage\backend" | Out-Null
+          Copy-Item $jar.FullName "$stage\backend\hms.jar"
+
+          # Frontend dist
+          New-Item -ItemType Directory -Force "$stage\frontend" | Out-Null
+          Copy-Item "frontend-src\hms_webapp\hms_frontend\dist\*" "$stage\frontend\" -Recurse
+
+      # ── Compile installer ─────────────────────────────────────────────────
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Compile installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DAppVersion="${{ steps.ver.outputs.VERSION }}" `
+            /O"output" `
+            installer-repo\installer\hms.iss
+
+      # ── Publish to GitHub Releases ────────────────────────────────────────
+
+      - name: Upload installer to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.VERSION }}
+          name: "Vyaptek HMS ${{ steps.ver.outputs.VERSION }}"
+          files: output\HMSSetup.exe
+          generate_release_notes: true
