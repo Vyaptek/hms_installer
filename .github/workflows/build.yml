@@ -46,6 +46,21 @@ jobs:
             echo "VERSION=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
           }
 
+      # ── Build frontend dist ───────────────────────────────────────────────
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        run: |
+          cd frontend-src\hms_webapp\hms_frontend
+          npm ci
+          npm run build
+        env:
+          VITE_API_BASE_URL: /api
+
       # ── Build backend JAR ─────────────────────────────────────────────────
 
       - name: Set up Java 17 (build only)
@@ -57,21 +72,6 @@ jobs:
       - name: Build backend JAR
         working-directory: backend-src
         run: ./gradlew bootJar --no-daemon
-
-      # ── Build frontend dist ───────────────────────────────────────────────
-
-      - name: Set up Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build frontend
-        run: |
-          cd frontend-src/hms_webapp/hms_frontend
-          npm ci
-          npm run build
-        env:
-          VITE_API_BASE_URL: /api
 
       # ── Download large binaries from binaries-stable release ─────────────
 
