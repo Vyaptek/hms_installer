@@ -90,10 +90,13 @@ jobs:
       - name: Assemble staging
         run: |
           $stage = "installer-repo\installer"
+          
+          # CRITICAL FIX: Ensure the base staging directory exists first
+          New-Item -ItemType Directory -Force $stage | Out-Null
 
           # Large binaries
           Copy-Item deps\java.msi $stage\
-          Copy-Item deps\pg.exe   $stage\
+          Copy-Item deps\pg.exe $stage\
 
           # Backend JAR (find the built jar regardless of version suffix)
           $jar = Get-ChildItem backend-src\build\libs\*.jar | Select-Object -First 1
@@ -102,7 +105,8 @@ jobs:
 
           # Frontend dist
           New-Item -ItemType Directory -Force "$stage\frontend" | Out-Null
-          Copy-Item "frontend-src\hms_webapp\hms_frontend\dist\*" "$stage\frontend\" -Recurse
+          $distFolder = (Get-ChildItem -Path "frontend-src" -Filter "dist" -Directory -Recurse).FullName
+          Copy-Item "$distFolder\*" "$stage\frontend\" -Recurse
 
       # ── Compile installer ─────────────────────────────────────────────────
 
