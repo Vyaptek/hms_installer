@@ -91,22 +91,21 @@ jobs:
         run: |
           $stage = "installer-repo\installer"
           
-          # CRITICAL FIX: Ensure the base staging directory exists first
+          # Ensure the base staging directory exists
           New-Item -ItemType Directory -Force $stage | Out-Null
 
           # Large binaries
           Copy-Item deps\java.msi $stage\
           Copy-Item deps\pg.exe $stage\
 
-          # Backend JAR (find the built jar regardless of version suffix)
+          # Backend JAR
           $jar = Get-ChildItem backend-src\build\libs\*.jar | Select-Object -First 1
           New-Item -ItemType Directory -Force "$stage\backend" | Out-Null
           Copy-Item $jar.FullName "$stage\backend\hms.jar"
 
-          # Frontend dist
+          # Frontend dist (FIXED: Direct path, skipping node_modules entirely)
           New-Item -ItemType Directory -Force "$stage\frontend" | Out-Null
-          $distFolder = (Get-ChildItem -Path "frontend-src" -Filter "dist" -Directory -Recurse).FullName
-          Copy-Item "$distFolder\*" "$stage\frontend\" -Recurse
+          Copy-Item "frontend-src\hms_frontend\dist\*" "$stage\frontend\" -Recurse
 
       # ── Compile installer ─────────────────────────────────────────────────
 
