@@ -89,23 +89,27 @@ jobs:
 
       - name: Assemble staging
         run: |
-          $stage = "installer-repo\installer"
-          
-          # Ensure the base staging directory exists
+          $stage = "installer-repo"
+
           New-Item -ItemType Directory -Force $stage | Out-Null
 
-          # Large binaries
+          # Large binaries — now land next to hms.iss
           Copy-Item deps\java.msi $stage\
-          Copy-Item deps\pg.exe $stage\
+          Copy-Item deps\pg.exe   $stage\
 
           # Backend JAR
-          $jar = Get-ChildItem backend-src\build\libs\*.jar | Select-Object -First 1
+          $jar = Get-ChildItem backend-src\build\libs\*.jar `
+                   | Where-Object { $_.Name -notlike "*plain*" } `
+                   | Select-Object -First 1
           New-Item -ItemType Directory -Force "$stage\backend" | Out-Null
           Copy-Item $jar.FullName "$stage\backend\hms.jar"
 
-          # Frontend dist (FIXED: Direct path, skipping node_modules entirely)
+          # Frontend dist — use same discovery logic as the build step
+          $frontendDir = (Get-ChildItem -Path "frontend-src" -Filter "package.json" `
+                           -Recurse | Where-Object { $_.DirectoryName -notlike "*node_modules*" } `
+                           | Select-Object -First 1).DirectoryName
           New-Item -ItemType Directory -Force "$stage\frontend" | Out-Null
-          Copy-Item "frontend-src\hms_frontend\dist\*" "$stage\frontend\" -Recurse
+          Copy-Item "$frontendDir\dist\*" "$stage\frontend\" -Recurse
 
       # ── Compile installer ─────────────────────────────────────────────────
 
