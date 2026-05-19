@@ -24,7 +24,7 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   // Stop all services before wipe+copy so no files are locked
   Exec('sc.exe', 'stop VyaptekHMS',   '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('sc.exe', 'stop VyaptekNginx', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'stop NginxWebProxy', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('sc.exe', 'stop VyaptekRedis', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(3000);
   Result := '';

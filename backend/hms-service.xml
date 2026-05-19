@@ -1,0 +1,15 @@
+<service>
+  <id>VyaptekHMS</id>
+  <name>Vyaptek HMS</name>
+  <description>Runs the Spring Boot backend for the hospital.</description>
+  <executable>%JAVA_HOME%\bin\java.exe</executable>
+  <arguments>-Xmx512m -jar "%BASE%\hms.jar"</arguments>
+  <startmode>Automatic</startmode>
+  <log mode="roll"></log>
+  <logpath>%BASE%\logs</logpath>
+  <env name="DB_URL"      value="jdbc:postgresql://127.0.0.1:5432/hospital_erp"/>
+  <env name="DB_USERNAME" value="postgres"/>
+  <env name="DB_PASSWORD" value="admin"/>
+  <env name="REDIS_HOST"  value="localhost"/>
+  <env name="REDIS_PORT"  value="6379"/>
+</service>

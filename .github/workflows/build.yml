@@ -3,17 +3,19 @@ name: Build HMS Installer
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version (e.g. v1.0.2)'
+        description: "Version (e.g. v1.0.2)"
         required: true
-        default: 'v1.0.0'
+        default: "v1.0.0"
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       # ── Checkout all three repos ──────────────────────────────────────────
@@ -36,22 +38,24 @@ jobs:
           repository: Vyaptek/hms_webapp
           token: ${{ secrets.REPO_ACCESS_TOKEN }}
           path: frontend-src
-          
+
       - name: Resolve version
         id: ver
         run: |
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            echo "VERSION=${{ inputs.version }}" >> $env:GITHUB_OUTPUT
+            $v = "${{ inputs.version }}"
           } else {
-            echo "VERSION=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
+            $v = "${{ github.ref_name }}"
           }
+          Write-Host "Version: $v"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "VERSION=$v"
 
       # ── Build frontend dist ───────────────────────────────────────────────
 
       - name: Set up Node 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Build frontend
         run: |
@@ -69,8 +73,8 @@ jobs:
       - name: Set up Java 17 (build only)
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          java-version: "17"
+          distribution: "temurin"
 
       - name: Build backend JAR
         working-directory: backend-src
@@ -121,7 +125,7 @@ jobs:
           # Dynamically locate the exact path to hms.iss
           $issFile = (Get-ChildItem -Path "installer-repo" -Filter "hms.iss" -Recurse).FullName
           Write-Host "Found Inno Setup script at: $issFile"
-          
+
           # Run the compiler using the discovered path
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             /DAppVersion="${{ steps.ver.outputs.VERSION }}" `
@@ -135,5 +139,4 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.VERSION }}
           name: "Vyaptek HMS ${{ steps.ver.outputs.VERSION }}"
-          files: output\HMSSetup.exe  # Double check this matches your current file configuration
-          generate_release_notes: true
+          files: output\HMSSetup.exe
