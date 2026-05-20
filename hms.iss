@@ -25,8 +25,6 @@ var
 
 procedure InitializeWizard;
 begin
-  PGAlreadyInstalled := FileExists(ExpandConstant('{app}\pgsql\bin\postgres.exe'));
-
   PGPage := CreateInputOptionPage(wpSelectDir,
     'PostgreSQL Installation',
     'An existing PostgreSQL installation was found.',
@@ -49,7 +47,10 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   if PageID = PGPage.ID then
-    Result := not PGAlreadyInstalled
+  begin
+    PGAlreadyInstalled := FileExists(WizardDirValue + '\pgsql\bin\postgres.exe');
+    Result := not PGAlreadyInstalled;
+  end
   else
     Result := False;
 end;
