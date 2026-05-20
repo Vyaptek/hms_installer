@@ -19,13 +19,64 @@ Name: "{app}\nginx\temp"
 [Code]
 var
   ResultCode: Integer;
+  PGAlreadyInstalled: Boolean;
+  PGPage: TInputOptionWizardPage;
+  DBPage: TInputOptionWizardPage;
+
+procedure InitializeWizard;
+begin
+  PGAlreadyInstalled := FileExists(ExpandConstant('{app}\pgsql\bin\postgres.exe'));
+
+  PGPage := CreateInputOptionPage(wpSelectDir,
+    'PostgreSQL Installation',
+    'An existing PostgreSQL installation was found.',
+    'Choose how to handle the existing PostgreSQL installation:',
+    True, False);
+  PGPage.Add('Skip PostgreSQL installation (recommended — already installed)');
+  PGPage.Add('Reinstall PostgreSQL (only if you are having database startup issues)');
+  PGPage.SelectedValueIndex := 0;
+
+  DBPage := CreateInputOptionPage(PGPage.ID,
+    'Database Setup',
+    'Choose how to initialise the hospital database.',
+    'What should happen to the existing database?',
+    True, False);
+  DBPage.Add('Keep existing data (recommended for upgrades)');
+  DBPage.Add('Clean install — delete ALL hospital data and start fresh (cannot be undone)');
+  DBPage.SelectedValueIndex := 0;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  if PageID = PGPage.ID then
+    Result := not PGAlreadyInstalled
+  else
+    Result := False;
+end;
+
+function ShouldInstallPG: Boolean;
+begin
+  if not PGAlreadyInstalled then
+    Result := True
+  else
+    Result := PGPage.SelectedValueIndex = 1;
+end;
+
+function ShouldCleanDB: Boolean;
+begin
+  Result := DBPage.SelectedValueIndex = 1;
+end;
+
+function ShouldKeepDB: Boolean;
+begin
+  Result := DBPage.SelectedValueIndex = 0;
+end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  // Stop all services before wipe+copy so no files are locked
-  Exec('sc.exe', 'stop VyaptekHMS',   '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'stop VyaptekHMS',    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('sc.exe', 'stop NginxWebProxy', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('sc.exe', 'stop VyaptekRedis', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'stop VyaptekRedis',  '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(3000);
   Result := '';
 end;
@@ -44,6 +95,7 @@ Source: "pg.exe";   DestDir: "{tmp}"; Flags: deleteafterinstall
 ; 2. Pre-flight SQL (extensions + role only — Flyway runs V1-V32 on first backend start)
 Source: "setup_database.sql"; DestDir: "{app}"
 Source: "init_db.bat";        DestDir: "{app}"; Flags: deleteafterinstall
+Source: "clean_db.bat";       DestDir: "{app}"; Flags: deleteafterinstall
 
 ; 3. Backend (Spring Boot JAR + WinSW)
 Source: "backend\*"; DestDir: "{app}\backend"; Flags: recursesubdirs createallsubdirs
@@ -69,11 +121,14 @@ Source: "redis\redis-install.bat";          DestDir: "{app}\redis"
 ; 1. Java 17
 Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\java.msi"" /qn ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJavaHome"; Flags: runhidden; StatusMsg: "Installing Java Runtime Environment..."
 
-; 2. PostgreSQL 18 — installed into app-local folder
-Filename: "{tmp}\pg.exe"; Parameters: "--mode unattended --unattendedmodeui none --superpassword ""admin"" --serverport 5432 --prefix ""{app}\pgsql"""; Flags: runhidden; StatusMsg: "Installing PostgreSQL 18..."
+; 2. PostgreSQL 18 — skipped if already installed and user chose to keep it
+Filename: "{tmp}\pg.exe"; Parameters: "--mode unattended --unattendedmodeui none --superpassword ""admin"" --serverport 5432 --prefix ""{app}\pgsql"""; Flags: runhidden; StatusMsg: "Installing PostgreSQL 18..."; Check: ShouldInstallPG
 
-; 3. Database init — waits for PG, creates hospital_erp DB, runs extension SQL
-Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"""; Flags: runhidden; StatusMsg: "Initializing database..."
+; 3a. Clean install — drop existing DB, recreate, run SQL
+Filename: "{app}\clean_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"""; Flags: runhidden; StatusMsg: "Resetting database..."; Check: ShouldCleanDB
+
+; 3b. Normal init — createdb (no-op if DB exists), run SQL
+Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"""; Flags: runhidden; StatusMsg: "Initializing database..."; Check: ShouldKeepDB
 
 ; 4. Redis — sc create bypasses WinSW AddAceToObjectsSecurityDescriptor bug on Windows 10/11
 ;    redis-install.bat registers AND starts the VyaptekRedis service in one call
