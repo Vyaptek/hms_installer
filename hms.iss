@@ -19,37 +19,32 @@ Name: "{app}\nginx\temp"
 [Code]
 var
   ResultCode: Integer;
-  PGAlreadyInstalled: Boolean;
-  PGPage: TInputOptionWizardPage;
+  PGInstalled: Boolean;   // postgres binary detected
+  DBPresent: Boolean;     // postgres data directory initialised
   DBPage: TInputOptionWizardPage;
 
 procedure InitializeWizard;
 begin
-  PGPage := CreateInputOptionPage(wpSelectDir,
-    'PostgreSQL Installation',
-    'An existing PostgreSQL installation was found.',
-    'Choose how to handle the existing PostgreSQL installation:',
+  DBPage := CreateInputOptionPage(wpSelectDir,
+    'Existing Installation Detected',
+    'PostgreSQL and the hospital database are already installed.',
+    'How would you like to proceed?',
     True, False);
-  PGPage.Add('Skip PostgreSQL installation (recommended — already installed)');
-  PGPage.Add('Reinstall PostgreSQL (only if you are having database startup issues)');
-  PGPage.SelectedValueIndex := 0;
-
-  DBPage := CreateInputOptionPage(PGPage.ID,
-    'Database Setup',
-    'Choose how to initialise the hospital database.',
-    'What should happen to the existing database?',
-    True, False);
-  DBPage.Add('Keep existing data (recommended for upgrades)');
-  DBPage.Add('Clean install — delete ALL hospital data and start fresh (cannot be undone)');
+  DBPage.Add('Keep existing data (recommended — upgrades without data loss)');
+  DBPage.Add('Fresh install — reinstall PostgreSQL and delete ALL hospital data (cannot be undone)');
   DBPage.SelectedValueIndex := 0;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  if PageID = PGPage.ID then
+  if PageID = DBPage.ID then
   begin
-    PGAlreadyInstalled := FileExists(WizardDirValue + '\pgsql\bin\postgres.exe');
-    Result := not PGAlreadyInstalled;
+    PGInstalled := FileExists(WizardDirValue + '\pgsql\bin\postgres.exe');
+    DBPresent   := FileExists(WizardDirValue + '\pgsql\data\PG_VERSION');
+    // Show the choice page only when both PG and the data directory are intact.
+    // Anything else (fresh machine, partial/failed prior install) gets a silent
+    // full install — no ambiguous options to confuse the user.
+    Result := not (PGInstalled and DBPresent);
   end
   else
     Result := False;
@@ -57,10 +52,10 @@ end;
 
 function ShouldInstallPG: Boolean;
 begin
-  if not PGAlreadyInstalled then
-    Result := True
+  if PGInstalled and DBPresent then
+    Result := DBPage.SelectedValueIndex = 1  // user explicitly chose fresh install
   else
-    Result := PGPage.SelectedValueIndex = 1;
+    Result := True;  // fresh or faulty installation — always install PG
 end;
 
 function ShouldCleanDB: Boolean;
