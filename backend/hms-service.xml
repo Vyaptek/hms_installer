@@ -5,6 +5,19 @@
   <executable>%JAVA_HOME%\bin\java.exe</executable>
   <arguments>-Xmx512m -jar "%BASE%\hms.jar"</arguments>
   <startmode>Automatic</startmode>
+
+  <!-- Wait for PostgreSQL and Redis before starting. The EDB installer registers
+       PostgreSQL 18 as "postgresql-x64-18" on 64-bit Windows by default. -->
+  <depend>postgresql-x64-18</depend>
+  <depend>VyaptekRedis</depend>
+
+  <!-- If startup still fails (e.g. PG accepted the connection after SCM reported
+       Running), retry up to three times before giving up. -->
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="20 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
   <log mode="roll"></log>
   <logpath>%BASE%\logs</logpath>
   <env name="DB_URL"      value="jdbc:postgresql://127.0.0.1:5432/hospital_erp"/>
