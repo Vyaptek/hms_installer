@@ -19,12 +19,17 @@ Name: "{app}\nginx\temp"
 [Code]
 var
   ResultCode: Integer;
-  PGInstalled: Boolean;   // postgres binary detected
-  DBPresent: Boolean;     // postgres data directory initialised
+  PGInstalled: Boolean;
   DBPage: TInputOptionWizardPage;
 
 procedure InitializeWizard;
 begin
+  // Detect an existing postgres installation via its Windows service registry key.
+  // This runs before any wizard page is shown so it is never affected by
+  // WizardDirValue timing issues that plagued the earlier FileExists approach.
+  PGInstalled := RegKeyExists(HKLM,
+    'SYSTEM\CurrentControlSet\Services\postgresql-x64-18');
+
   DBPage := CreateInputOptionPage(wpSelectDir,
     'Existing Installation Detected',
     'PostgreSQL and the hospital database are already installed.',
@@ -38,24 +43,17 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   if PageID = DBPage.ID then
-  begin
-    PGInstalled := FileExists(WizardDirValue + '\pgsql\bin\postgres.exe');
-    DBPresent   := FileExists(WizardDirValue + '\pgsql\data\PG_VERSION');
-    // Show the choice page only when both PG and the data directory are intact.
-    // Anything else (fresh machine, partial/failed prior install) gets a silent
-    // full install — no ambiguous options to confuse the user.
-    Result := not (PGInstalled and DBPresent);
-  end
+    Result := not PGInstalled
   else
     Result := False;
 end;
 
 function ShouldInstallPG: Boolean;
 begin
-  if PGInstalled and DBPresent then
-    Result := DBPage.SelectedValueIndex = 1  // user explicitly chose fresh install
+  if PGInstalled then
+    Result := DBPage.SelectedValueIndex = 1  // upgrade: reinstall only if user chose fresh install
   else
-    Result := True;  // fresh or faulty installation — always install PG
+    Result := True;  // fresh machine — always install PG
 end;
 
 function ShouldCleanDB: Boolean;
@@ -63,9 +61,9 @@ begin
   Result := DBPage.SelectedValueIndex = 1;
 end;
 
-function ShouldKeepDB: Boolean;
+function ShouldInitDB: Boolean;
 begin
-  Result := DBPage.SelectedValueIndex = 0;
+  Result := not PGInstalled;  // only needed on a fresh install; upgrades preserve existing data
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -86,7 +84,7 @@ Type: files; Name: "{app}\backend\hms.jar"
 [Files]
 ; 1. Installers — extracted to temp and deleted after use
 Source: "java.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall
-Source: "pg.exe";   DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "pg.exe";   DestDir: "{tmp}"; Flags: deleteafterinstall; Check: ShouldInstallPG
 
 ; 2. Pre-flight SQL (extensions + role only — Flyway runs V1-V32 on first backend start)
 Source: "setup_database.sql"; DestDir: "{app}"
@@ -123,8 +121,8 @@ Filename: "{tmp}\pg.exe"; Parameters: "--mode unattended --unattendedmodeui none
 ; 3a. Clean install — drop existing DB, recreate, run SQL
 Filename: "{app}\clean_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"""; Flags: runhidden; StatusMsg: "Resetting database..."; Check: ShouldCleanDB
 
-; 3b. Normal init — createdb (no-op if DB exists), run SQL
-Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"""; Flags: runhidden; StatusMsg: "Initializing database..."; Check: ShouldKeepDB
+; 3b. Fresh install only — create DB and run setup SQL (skipped on upgrades)
+Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"""; Flags: runhidden; StatusMsg: "Initializing database..."; Check: ShouldInitDB
 
 ; 4. Redis — sc create bypasses WinSW AddAceToObjectsSecurityDescriptor bug on Windows 10/11
 ;    redis-install.bat registers AND starts the VyaptekRedis service in one call
