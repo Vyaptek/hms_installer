@@ -21,19 +21,19 @@ jobs:
       # ── Checkout all three repos ──────────────────────────────────────────
 
       - name: Checkout installer repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: installer-repo
 
       - name: Checkout backend
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: Vyaptek/hospital_management_backend
           token: ${{ secrets.REPO_ACCESS_TOKEN }}
           path: backend-src
 
       - name: Checkout frontend
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: Vyaptek/hms_webapp
           token: ${{ secrets.REPO_ACCESS_TOKEN }}
@@ -53,7 +53,7 @@ jobs:
       # ── Build frontend dist ───────────────────────────────────────────────
 
       - name: Set up Node 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
 
@@ -71,7 +71,7 @@ jobs:
       # ── Build backend JAR ─────────────────────────────────────────────────
 
       - name: Set up Java 17 (build only)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: "17"
           distribution: "temurin"
@@ -135,7 +135,7 @@ jobs:
       # ── Publish to GitHub Releases ────────────────────────────────────────
 
       - name: Upload installer to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.ver.outputs.VERSION }}
           name: "Vyaptek HMS ${{ steps.ver.outputs.VERSION }}"
