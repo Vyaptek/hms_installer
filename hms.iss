@@ -124,10 +124,10 @@ Filename: "{app}\clean_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_d
 ; 3b. Fresh install only — create DB and run setup SQL (skipped on upgrades)
 Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"""; Flags: runhidden; StatusMsg: "Initializing database..."; Check: ShouldInitDB
 
-; 4. Redis — sc create bypasses WinSW AddAceToObjectsSecurityDescriptor bug on Windows 10/11
-;    redis-install.bat registers AND starts the VyaptekRedis service in one call
+; 4. Redis — use Redis native service installer.
+;    Do NOT use sc create; Redis console mode is not a valid Windows service entrypoint.
 Filename: "{app}\redis\redis-install.bat"; Parameters: """{app}\redis"""; Flags: runhidden; StatusMsg: "Registering and starting Redis..."
-
+ 
 ; 5. Backend — Flyway runs V1-V32 on first boot (may take ~30s on first install)
 Filename: "{app}\backend\hms-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
 Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."
