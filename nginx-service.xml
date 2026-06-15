@@ -8,4 +8,13 @@
   <log mode="roll"></log>
   <stopexecutable>%BASE%\nginx\nginx.exe</stopexecutable>
   <stoparguments>-s stop</stoparguments>
+
+  <!-- Start slightly after boot so the IIS/HTTP stack has settled and freed port 80. -->
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+
+  <!-- If nginx can't bind port 80 yet, retry instead of failing for good. -->
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="20 sec"/>
+  <resetfailure>1 hour</resetfailure>
 </service>

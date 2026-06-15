@@ -90,6 +90,7 @@ Source: "pg.exe";   DestDir: "{tmp}"; Flags: deleteafterinstall; Check: ShouldIn
 Source: "setup_database.sql"; DestDir: "{app}"
 Source: "init_db.bat";        DestDir: "{app}"; Flags: deleteafterinstall
 Source: "clean_db.bat";       DestDir: "{app}"; Flags: deleteafterinstall
+Source: "free-port-80.bat";   DestDir: "{app}"
 
 ; 3. Backend (Spring Boot JAR + WinSW)
 Source: "backend\*"; DestDir: "{app}\backend"; Flags: recursesubdirs createallsubdirs
@@ -133,6 +134,9 @@ Filename: "{app}\backend\hms-service.exe"; Parameters: "install"; Flags: runhidd
 Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."
 
 ; 6. Nginx + React frontend
+;    Free port 80 first -- stop & disable the IIS/HTTP stack (W3SVC/WAS) that
+;    otherwise squats on port 80 and prevents Nginx from binding.
+Filename: "{app}\free-port-80.bat"; Flags: runhidden; StatusMsg: "Freeing web port 80..."
 Filename: "{app}\nginx-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Web Server..."
 Filename: "{app}\nginx-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting User Interface..."
 
