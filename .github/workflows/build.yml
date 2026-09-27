@@ -21,6 +21,13 @@ on:
 # is (backend plan 24, I1): the audited build must be the shipped build. A pushed installer tag vX.Y.Z
 # builds backend and frontend tag vX.Y.Z, so tag all three repositories together.
 
+# Bundled third-party binaries, pinned by version and SHA-256 so a rebuild of the same tag ships the
+# same bytes. Refresh each quarter (Temurin: https://adoptium.net/temurin/releases/).
+env:
+  # Temurin JRE, the backend's runtime on the box. Must match the backend's Gradle toolchain (25).
+  JRE_URL: https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jre_x64_windows_hotspot_25.0.4.1_1.zip
+  JRE_SHA256: 4c95451cea98556def2c54f7782933f52a26d4a36bd85e1d59f0364464828b07
+
 jobs:
   build:
     runs-on: windows-latest
@@ -106,10 +113,10 @@ jobs:
 
       # ── Build backend JAR ─────────────────────────────────────────────────
 
-      - name: Set up Java 17 (build only)
+      - name: Set up Java 25 (build only)
         uses: actions/setup-java@v5
         with:
-          java-version: "17"
+          java-version: "25"
           distribution: "temurin"
 
       - name: Build backend JAR
@@ -123,7 +130,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download binaries-stable --dir deps `
-            --repo ${{ github.repository }}
+            --repo ${{ github.repository }} --pattern pg.exe
+
+      - name: Download Java runtime
+        run: |
+          Invoke-WebRequest $env:JRE_URL -OutFile deps\jre.zip
+          $hash = (Get-FileHash deps\jre.zip -Algorithm SHA256).Hash
+          if ($hash -ne $env:JRE_SHA256) { throw "JRE checksum mismatch: got $hash" }
+          Expand-Archive deps\jre.zip -DestinationPath deps\jre-unzipped
 
       # ── Assemble staging directory ────────────────────────────────────────
 
@@ -134,8 +148,12 @@ jobs:
           New-Item -ItemType Directory -Force $stage | Out-Null
 
           # Large binaries — now land next to hms.iss
-          Copy-Item deps\java.msi $stage\
           Copy-Item deps\pg.exe   $stage\
+
+          # Java runtime: the zip holds one top-level folder (jdk-25.x+y-jre); hms.iss wants jre\bin\java.exe
+          $jreRoot = Get-ChildItem deps\jre-unzipped -Directory | Select-Object -First 1
+          Move-Item $jreRoot.FullName "$stage\jre"
+          if (-not (Test-Path "$stage\jre\bin\java.exe")) { throw "jre\bin\java.exe missing after unzip" }
 
           # Backend JAR
           $jar = Get-ChildItem backend-src\build\libs\*.jar `

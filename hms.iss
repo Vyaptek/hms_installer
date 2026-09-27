@@ -193,10 +193,16 @@ end;
 Type: filesandordirs; Name: "{app}\frontend"
 ; Remove old backend JAR before copying new one
 Type: files; Name: "{app}\backend\hms.jar"
+; Replace the Java runtime whole, so files a newer JRE dropped don't linger
+Type: filesandordirs; Name: "{app}\jre"
 
 [Files]
-; 1. Installers — extracted to temp and deleted after use
-Source: "java.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall
+; 1. Java runtime — a private Temurin JRE that only the backend service uses (hms-service.xml).
+;    It is not put on PATH or JAVA_HOME. Boxes installed before 2026-09 keep the Temurin 17 JDK the
+;    old installer put there; HMS no longer uses it.
+Source: "jre\*"; DestDir: "{app}\jre"; Flags: recursesubdirs createallsubdirs ignoreversion
+
+;    Installers — extracted to temp and deleted after use
 Source: "pg.exe";   DestDir: "{tmp}"; Flags: deleteafterinstall; Check: ShouldInstallPG
 
 ; 2. Pre-flight SQL (extensions + role only — Flyway runs V1-V32 on first backend start)
@@ -234,10 +240,7 @@ Source: "redis\redis.windows-service.conf"; DestDir: "{app}\redis"
 Source: "redis\redis-install.bat";          DestDir: "{app}\redis"
 
 [Run]
-; 1. Java 17
-Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\java.msi"" /qn ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJavaHome"; Flags: runhidden; StatusMsg: "Installing Java Runtime Environment..."
-
-; 2. PostgreSQL 18 — skipped if already installed and user chose to keep it
+; 1. PostgreSQL 18 — skipped if already installed and user chose to keep it
 Filename: "{tmp}\pg.exe"; Parameters: "--mode unattended --unattendedmodeui none --superpassword ""admin"" --serverport 5432 --prefix ""{app}\pgsql"""; Flags: runhidden; StatusMsg: "Installing PostgreSQL 18..."; Check: ShouldInstallPG
 
 ; 3a. Clean install — drop existing DB, recreate, run SQL

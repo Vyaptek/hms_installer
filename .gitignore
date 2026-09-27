@@ -1,1 +1,9 @@
 backend/config/
+# Build inputs the CI workflow downloads or builds (never committed)
+jre/
+pg.exe
+java.msi
+LibreOffice*.msi
+frontend/
+backend/hms.jar
+output/
