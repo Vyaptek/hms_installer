@@ -4,6 +4,9 @@
   <description>Runs the Spring Boot backend for the hospital.</description>
   <executable>%JAVA_HOME%\bin\java.exe</executable>
   <arguments>-Xmx512m -jar "%BASE%\hms.jar"</arguments>
+  <!-- Spring Boot reads config\application.properties (this box's secrets, written by
+       write-secrets.ps1) relative to the working directory, so pin it to this folder. -->
+  <workingdirectory>%BASE%</workingdirectory>
   <startmode>Automatic</startmode>
 
   <!-- Wait for PostgreSQL and Redis before starting. The EDB installer registers

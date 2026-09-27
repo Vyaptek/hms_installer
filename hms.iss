@@ -21,6 +21,7 @@ var
   ResultCode: Integer;
   PGInstalled: Boolean;
   DBPage: TInputOptionWizardPage;
+  AdminPage: TInputQueryWizardPage;
 
 procedure InitializeWizard;
 begin
@@ -38,14 +39,16 @@ begin
   DBPage.Add('Keep existing data (recommended — upgrades without data loss)');
   DBPage.Add('Fresh install — reinstall PostgreSQL and delete ALL hospital data (cannot be undone)');
   DBPage.SelectedValueIndex := 0;
-end;
 
-function ShouldSkipPage(PageID: Integer): Boolean;
-begin
-  if PageID = DBPage.ID then
-    Result := not PGInstalled
-  else
-    Result := False;
+  // A new database seeds admin@example.com with a password that is public (it is in the backend's
+  // migrations). The password chosen here replaces it at the backend's first start.
+  AdminPage := CreateInputQueryPage(DBPage.ID,
+    'Administrator Password',
+    'Choose the password for the admin@example.com account.',
+    'The hospital database is new, so its administrator account needs a password. ' +
+    'Use at least 10 characters: letters, digits and symbols, no spaces. It is not shown again.');
+  AdminPage.Add('Administrator password:', True);
+  AdminPage.Add('Confirm password:', True);
 end;
 
 function ShouldInstallPG: Boolean;
@@ -64,6 +67,91 @@ end;
 function ShouldInitDB: Boolean;
 begin
   Result := not PGInstalled;  // only needed on a fresh install; upgrades preserve existing data
+end;
+
+// True when this run creates the database, so the seeded admin account is new.
+function NeedsAdminPassword: Boolean;
+begin
+  Result := ShouldInitDB or ShouldCleanDB;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  if PageID = DBPage.ID then
+    Result := not PGInstalled
+  else if PageID = AdminPage.ID then
+    Result := not NeedsAdminPassword
+  else
+    Result := False;
+end;
+
+function IsPrintableAsciiWithoutSpace(const S: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  for I := 1 to Length(S) do
+    if (Ord(S[I]) < $21) or (Ord(S[I]) > $7E) then
+    begin
+      Result := False;
+      Exit;
+    end;
+end;
+
+// Mirrors the backend's rules (PasswordPolicy) as far as the installer can check them. The backend
+// also refuses the seeded password itself; it then logs "was not applied" and asks for a change at
+// the first sign-in.
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  Pw, Problem: String;
+begin
+  Result := True;
+  if CurPageID <> AdminPage.ID then
+    Exit;
+  Pw := AdminPage.Values[0];
+  Problem := '';
+  if Pw <> AdminPage.Values[1] then
+    Problem := 'The two passwords do not match.'
+  else if Length(Pw) < 10 then
+    Problem := 'The password must be at least 10 characters.'
+  else if Length(Pw) > 72 then
+    Problem := 'The password must be at most 72 characters.'
+  else if not IsPrintableAsciiWithoutSpace(Pw) then
+    Problem := 'Use English letters, digits and symbols only, without spaces.'
+  else if CompareText(Pw, 'admin@example.com') = 0 then
+    Problem := 'The password must not be the user name.';
+  if Problem <> '' then
+  begin
+    MsgBox(Problem, mbError, MB_OK);
+    Result := False;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  // Handed to write-secrets.ps1 through a file in {tmp}, never on a command line: other users can
+  // read process command lines. {tmp} is private to this run and deleted when it ends.
+  if (CurStep = ssInstall) and NeedsAdminPassword and (AdminPage.Values[0] <> '') then
+    SaveStringToFile(ExpandConstant('{tmp}\admin-password.txt'), AdminPage.Values[0], False);
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and NeedsAdminPassword and (AdminPage.Values[0] <> '') then
+    WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
+      'Sign in as admin@example.com with the administrator password you chose.';
+end;
+
+// Without the secret file the backend refuses to start, so say so rather than finish quietly.
+procedure CheckSecretsWritten;
+begin
+  if not FileExists(ExpandConstant('{app}\backend\config\application.properties')) then
+    SuppressibleMsgBox('The sign-in key file could not be created in ' +
+      ExpandConstant('{app}\backend\config') + '. The HMS backend will not start until it exists. ' +
+      'As an administrator run: powershell -ExecutionPolicy Bypass -File "' +
+      ExpandConstant('{app}\write-secrets.ps1') + '" -ConfigDir "' + ExpandConstant('{app}\backend\config') +
+      '", then start the VyaptekHMS service.',
+      mbCriticalError, MB_OK, IDOK);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -93,7 +181,11 @@ Source: "clean_db.bat";       DestDir: "{app}"; Flags: deleteafterinstall
 Source: "free-port-80.bat";   DestDir: "{app}"
 
 ; 3. Backend (Spring Boot JAR + WinSW)
-Source: "backend\*"; DestDir: "{app}\backend"; Flags: recursesubdirs createallsubdirs
+;    Never ship backend\config: it holds each box's own secrets, and copying one over an install
+;    would replace that box's secret on every upgrade.
+Source: "backend\*"; DestDir: "{app}\backend"; Excludes: "\config,\config\*"; Flags: recursesubdirs createallsubdirs
+;    Kept on the box: it also gives an already-installed box its own secret (backend plan 24 §10).
+Source: "write-secrets.ps1"; DestDir: "{app}"
 
 ; 4. Frontend (React/Vite build — assets/, index.html, etc.)
 Source: "frontend\*"; DestDir: "{app}\frontend"; Flags: recursesubdirs createallsubdirs
@@ -130,6 +222,9 @@ Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_da
 Filename: "{app}\redis\redis-install.bat"; Parameters: """{app}\redis"""; Flags: runhidden; StatusMsg: "Registering and starting Redis..."
  
 ; 5. Backend — Flyway runs V1-V32 on first boot (may take ~30s on first install)
+;    First the box's own secrets (sign-in key; admin password on a new database). An upgrade keeps
+;    the existing key; a box that never had one gets one, which logs everyone out once.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Generating the sign-in key..."; AfterInstall: CheckSecretsWritten
 Filename: "{app}\backend\hms-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
 Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."
 
@@ -152,3 +247,7 @@ Filename: "{app}\backend\hms-service.exe";   Parameters: "uninstall"; Flags: run
 Filename: "{sys}\sc.exe"; Parameters: "stop VyaptekRedis";   Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "delete VyaptekRedis"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name=""Vyaptek HMS Web"""""; Flags: runhidden; RunOnceId: "RemoveFirewallRule"
+
+[UninstallDelete]
+; The box's secrets. A reinstall gets a fresh sign-in key, which logs everyone out once.
+Type: filesandordirs; Name: "{app}\backend\config"
