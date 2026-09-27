@@ -154,6 +154,26 @@ begin
       mbCriticalError, MB_OK, IDOK);
 end;
 
+// nginx answers only for host names it knows (backend plan 24, L5): localhost, IPv4 addresses (in
+// nginx.conf) and this computer's name, written here. A name with other characters is left out, so it
+// can never break the config; the hospital can list it in server-names-extra.conf.
+procedure WriteServerNames;
+var
+  Name, Line: String;
+  I: Integer;
+  Valid: Boolean;
+begin
+  Name := Lowercase(GetComputerNameString);
+  Valid := Name <> '';
+  for I := 1 to Length(Name) do
+    if not (((Name[I] >= 'a') and (Name[I] <= 'z')) or ((Name[I] >= '0') and (Name[I] <= '9')) or (Name[I] = '-')) then
+      Valid := False;
+  Line := '# Written by the installer: this computer''s name. Replaced on every install and upgrade.' + #13#10;
+  if Valid then
+    Line := Line + 'server_name ' + Name + ';' + #13#10;
+  SaveStringToFile(ExpandConstant('{app}\nginx\conf\server-names.conf'), Line, False);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Exec('sc.exe', 'stop VyaptekHMS',    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -192,7 +212,11 @@ Source: "frontend\*"; DestDir: "{app}\frontend"; Flags: recursesubdirs createall
 
 ; 5. Nginx — skip contrib (editor plugins) and docs; logs\ and temp\ created by [Dirs]
 Source: "nginx\nginx.exe"; DestDir: "{app}\nginx"
-Source: "nginx\conf\*";    DestDir: "{app}\nginx\conf"; Flags: recursesubdirs createallsubdirs
+Source: "nginx\conf\*";    DestDir: "{app}\nginx\conf"; Excludes: "server-names.conf,server-names-extra.conf"; Flags: recursesubdirs createallsubdirs
+;    This computer's name, written over the placeholder on every run (plan 24, L5).
+Source: "nginx\conf\server-names.conf"; DestDir: "{app}\nginx\conf"; AfterInstall: WriteServerNames
+;    The hospital's own host names for this box; theirs to edit, so never replaced.
+Source: "nginx\conf\server-names-extra.conf"; DestDir: "{app}\nginx\conf"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "nginx\html\*";    DestDir: "{app}\nginx\html"; Flags: recursesubdirs createallsubdirs
 Source: "nginx-service.exe"; DestDir: "{app}"
 Source: "nginx-service.xml"; DestDir: "{app}"
