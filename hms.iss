@@ -208,7 +208,7 @@ Source: "backend\*"; DestDir: "{app}\backend"; Excludes: "\config,\config\*"; Fl
 Source: "write-secrets.ps1"; DestDir: "{app}"
 
 ; 4. Frontend (React/Vite build — assets/, index.html, etc.)
-Source: "frontend\*"; DestDir: "{app}\frontend"; Flags: recursesubdirs createallsubdirs
+Source: "frontend\*"; DestDir: "{app}\frontend"; Excludes: "*.map"; Flags: recursesubdirs createallsubdirs
 
 ; 5. Nginx — skip contrib (editor plugins) and docs; logs\ and temp\ created by [Dirs]
 Source: "nginx\nginx.exe"; DestDir: "{app}\nginx"
