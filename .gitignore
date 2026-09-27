@@ -3,7 +3,7 @@ backend/config/
 jre/
 pg.exe
 java.msi
-LibreOffice*.msi
+libreoffice.msi
 frontend/
 backend/hms.jar
 output/

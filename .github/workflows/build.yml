@@ -22,11 +22,18 @@ on:
 # builds backend and frontend tag vX.Y.Z, so tag all three repositories together.
 
 # Bundled third-party binaries, pinned by version and SHA-256 so a rebuild of the same tag ships the
-# same bytes. Refresh each quarter (Temurin: https://adoptium.net/temurin/releases/).
+# same bytes. Refresh each quarter (Temurin: https://adoptium.net/temurin/releases/, LibreOffice:
+# https://www.libreoffice.org/download/release-notes/).
 env:
   # Temurin JRE, the backend's runtime on the box. Must match the backend's Gradle toolchain (25).
+  JRE_VERSION: 25.0.4.1+1
   JRE_URL: https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jre_x64_windows_hotspot_25.0.4.1_1.zip
   JRE_SHA256: 4c95451cea98556def2c54f7782933f52a26d4a36bd85e1d59f0364464828b07
+  # LibreOffice, which turns reports into PDF. The archive URL outlives the release's place in
+  # /stable/. LO_VERSION is what soffice.exe reports; hms.iss compares it with an installed copy.
+  LO_VERSION: 26.2.6.3
+  LO_URL: https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.6.3/win/x86_64/LibreOffice_26.2.6.3_Win_x86-64.msi
+  LO_SHA256: f9877032fd908beb9c0ddf06df4af5c2e85f419c42e14876c4cce5aae5fb2660
 
 jobs:
   build:
@@ -95,10 +102,11 @@ jobs:
 
       # ── Build frontend dist ───────────────────────────────────────────────
 
-      - name: Set up Node 20
+      # Same Node as hms_webapp's own CI. Node 20 reached end of life in April 2026.
+      - name: Set up Node 24
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Build frontend
         run: |
@@ -132,11 +140,15 @@ jobs:
           gh release download binaries-stable --dir deps `
             --repo ${{ github.repository }} --pattern pg.exe
 
-      - name: Download Java runtime
+      - name: Download Java runtime and LibreOffice
         run: |
-          Invoke-WebRequest $env:JRE_URL -OutFile deps\jre.zip
-          $hash = (Get-FileHash deps\jre.zip -Algorithm SHA256).Hash
-          if ($hash -ne $env:JRE_SHA256) { throw "JRE checksum mismatch: got $hash" }
+          function Get-Pinned([string]$url, [string]$sha256, [string]$out) {
+            Invoke-WebRequest $url -OutFile $out
+            $hash = (Get-FileHash $out -Algorithm SHA256).Hash
+            if ($hash -ne $sha256) { throw "Checksum mismatch for $url`: got $hash" }
+          }
+          Get-Pinned $env:JRE_URL $env:JRE_SHA256 deps\jre.zip
+          Get-Pinned $env:LO_URL $env:LO_SHA256 deps\libreoffice.msi
           Expand-Archive deps\jre.zip -DestinationPath deps\jre-unzipped
 
       # ── Assemble staging directory ────────────────────────────────────────
@@ -148,7 +160,8 @@ jobs:
           New-Item -ItemType Directory -Force $stage | Out-Null
 
           # Large binaries — now land next to hms.iss
-          Copy-Item deps\pg.exe   $stage\
+          Copy-Item deps\pg.exe          $stage\
+          Copy-Item deps\libreoffice.msi $stage\
 
           # Java runtime: the zip holds one top-level folder (jdk-25.x+y-jre); hms.iss wants jre\bin\java.exe
           $jreRoot = Get-ChildItem deps\jre-unzipped -Directory | Select-Object -First 1
@@ -180,11 +193,16 @@ jobs:
           $issFile = (Get-ChildItem -Path "installer-repo" -Filter "hms.iss" -Recurse).FullName
           Write-Host "Found Inno Setup script at: $issFile"
 
+          # AppVersion without the tag's leading "v": it is what Windows shows under Apps.
+          $appVersion = "${{ steps.ver.outputs.VERSION }}".TrimStart('v')
+
           # Run the compiler using the discovered path
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            /DAppVersion="${{ steps.ver.outputs.VERSION }}" `
+            /DAppVersion="$appVersion" `
+            /DLibreOfficeVersion="$env:LO_VERSION" `
             /O"output" `
             "$issFile"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
       - name: Hash the installer
         id: hash
@@ -205,4 +223,5 @@ jobs:
             - hms_webapp `${{ steps.refs.outputs.FRONTEND }}` (`${{ steps.shas.outputs.FRONTEND_SHA }}`)
             - hms_installer `${{ steps.shas.outputs.INSTALLER_SHA }}`
             - HMSSetup.exe SHA-256 `${{ steps.hash.outputs.SHA256 }}`
+            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, PostgreSQL 18 (binaries-stable)
           files: output\HMSSetup.exe

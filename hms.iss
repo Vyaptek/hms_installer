@@ -1,8 +1,18 @@
+; Set by the CI workflow (/DAppVersion, /DLibreOfficeVersion); these defaults are for local builds.
+#ifndef AppVersion
+  #define AppVersion "0.0.0-local"
+#endif
+; The bundled libreoffice.msi's version, as soffice.exe reports it.
+#ifndef LibreOfficeVersion
+  #define LibreOfficeVersion "26.2.6.3"
+#endif
+
 [Setup]
 ArchitecturesInstallIn64BitMode=x64compatible
 AppId={{010389d7-9c59-4047-b368-0da2344ea258}}
 AppName=Vyaptek HMS
-AppVersion=1.0
+AppVersion={#AppVersion}
+VersionInfoProductTextVersion={#AppVersion}
 AppPublisher=Vyaptek
 DefaultDirName={autopf}\Vyaptek\HMS
 OutputDir=userdocs:InnoSetupOutput
@@ -20,6 +30,7 @@ Name: "{app}\nginx\temp"
 var
   ResultCode: Integer;
   PGInstalled: Boolean;
+  LibreOfficeChecked, LibreOfficeNeeded: Boolean;
   DBPage: TInputOptionWizardPage;
   AdminPage: TInputQueryWizardPage;
 
@@ -179,6 +190,26 @@ begin
   SaveStringToFile(ExpandConstant('{app}\nginx\conf\server-names.conf'), Line, False);
 end;
 
+// The backend turns reports into PDF with LibreOffice (backend optimization/21). Install the bundled
+// one when the box has none or an older one; a newer one the hospital installed is left alone.
+// Worked out once, because [Files] and [Run] both ask and [Run] comes after the copy.
+function ShouldInstallLibreOffice: Boolean;
+var
+  Installed: String;
+  InstalledPacked, BundledPacked: Int64;
+begin
+  if not LibreOfficeChecked then
+  begin
+    LibreOfficeNeeded := True;
+    if GetVersionNumbersString(ExpandConstant('{commonpf64}\LibreOffice\program\soffice.exe'), Installed) and
+       StrToVersion(Installed, InstalledPacked) and
+       StrToVersion('{#LibreOfficeVersion}', BundledPacked) then
+      LibreOfficeNeeded := ComparePackedVersion(InstalledPacked, BundledPacked) < 0;
+    LibreOfficeChecked := True;
+  end;
+  Result := LibreOfficeNeeded;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Exec('sc.exe', 'stop VyaptekHMS',    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -203,9 +234,10 @@ Type: filesandordirs; Name: "{app}\jre"
 Source: "jre\*"; DestDir: "{app}\jre"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 ;    Installers — extracted to temp and deleted after use
+Source: "libreoffice.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall nocompression; Check: ShouldInstallLibreOffice
 Source: "pg.exe";   DestDir: "{tmp}"; Flags: deleteafterinstall; Check: ShouldInstallPG
 
-; 2. Pre-flight SQL (extensions + role only — Flyway runs V1-V32 on first backend start)
+; 2. Pre-flight SQL (extensions + role only — Flyway migrates on first backend start)
 Source: "setup_database.sql"; DestDir: "{app}"
 Source: "init_db.bat";        DestDir: "{app}"; Flags: deleteafterinstall
 Source: "clean_db.bat";       DestDir: "{app}"; Flags: deleteafterinstall
@@ -243,24 +275,28 @@ Source: "redis\redis-install.bat";          DestDir: "{app}\redis"
 ; 1. PostgreSQL 18 — skipped if already installed and user chose to keep it
 Filename: "{tmp}\pg.exe"; Parameters: "--mode unattended --unattendedmodeui none --superpassword ""admin"" --serverport 5432 --prefix ""{app}\pgsql"""; Flags: runhidden; StatusMsg: "Installing PostgreSQL 18..."; Check: ShouldInstallPG
 
-; 3a. Clean install — drop existing DB, recreate, run SQL
+; 2a. Clean install — drop existing DB, recreate, run SQL
 Filename: "{app}\clean_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"" ""{app}\backend\config\application.properties"""; Flags: runhidden; StatusMsg: "Resetting database..."; Check: ShouldCleanDB
 
-; 3b. Fresh install only — create DB and run setup SQL (skipped on upgrades)
+; 2b. Fresh install only — create DB and run setup SQL (skipped on upgrades)
 Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"" ""{app}\backend\config\application.properties"""; Flags: runhidden; StatusMsg: "Initializing database..."; Check: ShouldInitDB
 
-; 4. The box's own secrets (backend plan 24, C2, C6, I3): the sign-in key (kept on upgrade; a box that
+; 3. The box's own secrets (backend plan 24, C2, C6, I3): the sign-in key (kept on upgrade; a box that
 ;    never had one gets one, which logs everyone out once), the admin password on a new database, a
 ;    random PostgreSQL superuser password instead of "admin" (again when the database is new) and a
 ;    Redis password. Before Redis is (re)installed, so it starts with its password.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"" -NewDatabase"; Flags: runhidden waituntilterminated; StatusMsg: "Generating this computer's keys..."; Check: NeedsAdminPassword; AfterInstall: CheckSecretsWritten
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"""; Flags: runhidden waituntilterminated; StatusMsg: "Checking this computer's keys..."; Check: KeepsDatabase; AfterInstall: CheckSecretsWritten
 
-; 5. Redis — use Redis native service installer.
+; 4. Redis — use Redis native service installer.
 ;    Do NOT use sc create; Redis console mode is not a valid Windows service entrypoint.
 Filename: "{app}\redis\redis-install.bat"; Parameters: """{app}\redis"""; Flags: runhidden; StatusMsg: "Registering and starting Redis..."
  
-; 6. Backend — Flyway runs V1-V32 on first boot (may take ~30s on first install)
+; 5. LibreOffice, for PDF reports. Without it the backend still runs, but every PDF fails.
+;    REGISTER_NO_MSO_TYPES=1 leaves .docx/.xlsx opening in MS Office on PCs that have it.
+Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\libreoffice.msi"" /qn /norestart ADDLOCAL=ALL REMOVE=gm_o_Onlineupdate REGISTER_NO_MSO_TYPES=1 QUICKSTART=0 ISCHECKFORPRODUCTUPDATES=0 CREATEDESKTOPLINK=0 RebootYesNo=No UI_LANGS=en_US"; Flags: runhidden; StatusMsg: "Installing LibreOffice (PDF reports)..."; Check: ShouldInstallLibreOffice
+
+; 6. Backend — Flyway migrates on first boot (may take ~30s on first install)
 Filename: "{app}\backend\hms-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
 Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."
 
