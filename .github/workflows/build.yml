@@ -10,6 +10,30 @@ on:
         description: "Version (e.g. v1.0.2)"
         required: true
         default: "v1.0.0"
+      backend_ref:
+        description: "hospital_management_backend tag to build (a release tag, never a branch)"
+        required: true
+      frontend_ref:
+        description: "hms_webapp tag to build (a release tag, never a branch)"
+        required: true
+
+# An installer is built from release tags of the backend and the frontend, never from whatever `main`
+# is (backend plan 24, I1): the audited build must be the shipped build. A pushed installer tag vX.Y.Z
+# builds backend and frontend tag vX.Y.Z, so tag all three repositories together.
+
+# Bundled third-party binaries, pinned by version and SHA-256 so a rebuild of the same tag ships the
+# same bytes. Refresh each quarter (Temurin: https://adoptium.net/temurin/releases/, LibreOffice:
+# https://www.libreoffice.org/download/release-notes/).
+env:
+  # Temurin JRE, the backend's runtime on the box. Must match the backend's Gradle toolchain (25).
+  JRE_VERSION: 25.0.4.1+1
+  JRE_URL: https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jre_x64_windows_hotspot_25.0.4.1_1.zip
+  JRE_SHA256: 4c95451cea98556def2c54f7782933f52a26d4a36bd85e1d59f0364464828b07
+  # LibreOffice, which turns reports into PDF. The archive URL outlives the release's place in
+  # /stable/. LO_VERSION is what soffice.exe reports; hms.iss compares it with an installed copy.
+  LO_VERSION: 26.2.6.3
+  LO_URL: https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.6.3/win/x86_64/LibreOffice_26.2.6.3_Win_x86-64.msi
+  LO_SHA256: f9877032fd908beb9c0ddf06df4af5c2e85f419c42e14876c4cce5aae5fb2660
 
 jobs:
   build:
@@ -25,10 +49,24 @@ jobs:
         with:
           path: installer-repo
 
+      - name: Resolve backend and frontend tags
+        id: refs
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $be = "${{ inputs.backend_ref }}"
+            $fe = "${{ inputs.frontend_ref }}"
+          } else {
+            $be = "${{ github.ref_name }}"
+            $fe = "${{ github.ref_name }}"
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "BACKEND=$be"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "FRONTEND=$fe"
+
       - name: Checkout backend
         uses: actions/checkout@v6
         with:
           repository: Vyaptek/hospital_management_backend
+          ref: refs/tags/${{ steps.refs.outputs.BACKEND }}
           token: ${{ secrets.REPO_ACCESS_TOKEN }}
           path: backend-src
 
@@ -36,8 +74,20 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Vyaptek/hms_webapp
+          ref: refs/tags/${{ steps.refs.outputs.FRONTEND }}
           token: ${{ secrets.REPO_ACCESS_TOKEN }}
           path: frontend-src
+
+      # Recorded in the release notes, so a box's installer can be traced to the exact audited commits.
+      - name: Record the commits built
+        id: shas
+        run: |
+          $be = git -C backend-src rev-parse HEAD
+          $fe = git -C frontend-src rev-parse HEAD
+          $in = git -C installer-repo rev-parse HEAD
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "BACKEND_SHA=$be"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "FRONTEND_SHA=$fe"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "INSTALLER_SHA=$in"
 
       - name: Resolve version
         id: ver
@@ -52,10 +102,11 @@ jobs:
 
       # ── Build frontend dist ───────────────────────────────────────────────
 
-      - name: Set up Node 20
+      # Same Node as hms_webapp's own CI. Node 20 reached end of life in April 2026.
+      - name: Set up Node 24
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Build frontend
         run: |
@@ -70,10 +121,10 @@ jobs:
 
       # ── Build backend JAR ─────────────────────────────────────────────────
 
-      - name: Set up Java 17 (build only)
+      - name: Set up Java 25 (build only)
         uses: actions/setup-java@v5
         with:
-          java-version: "17"
+          java-version: "25"
           distribution: "temurin"
 
       - name: Build backend JAR
@@ -87,7 +138,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download binaries-stable --dir deps `
-            --repo ${{ github.repository }}
+            --repo ${{ github.repository }} --pattern pg.exe
+
+      - name: Download Java runtime and LibreOffice
+        run: |
+          function Get-Pinned([string]$url, [string]$sha256, [string]$out) {
+            Invoke-WebRequest $url -OutFile $out
+            $hash = (Get-FileHash $out -Algorithm SHA256).Hash
+            if ($hash -ne $sha256) { throw "Checksum mismatch for $url`: got $hash" }
+          }
+          Get-Pinned $env:JRE_URL $env:JRE_SHA256 deps\jre.zip
+          Get-Pinned $env:LO_URL $env:LO_SHA256 deps\libreoffice.msi
+          Expand-Archive deps\jre.zip -DestinationPath deps\jre-unzipped
 
       # ── Assemble staging directory ────────────────────────────────────────
 
@@ -98,8 +160,13 @@ jobs:
           New-Item -ItemType Directory -Force $stage | Out-Null
 
           # Large binaries — now land next to hms.iss
-          Copy-Item deps\java.msi $stage\
-          Copy-Item deps\pg.exe   $stage\
+          Copy-Item deps\pg.exe          $stage\
+          Copy-Item deps\libreoffice.msi $stage\
+
+          # Java runtime: the zip holds one top-level folder (jdk-25.x+y-jre); hms.iss wants jre\bin\java.exe
+          $jreRoot = Get-ChildItem deps\jre-unzipped -Directory | Select-Object -First 1
+          Move-Item $jreRoot.FullName "$stage\jre"
+          if (-not (Test-Path "$stage\jre\bin\java.exe")) { throw "jre\bin\java.exe missing after unzip" }
 
           # Backend JAR
           $jar = Get-ChildItem backend-src\build\libs\*.jar `
@@ -126,11 +193,22 @@ jobs:
           $issFile = (Get-ChildItem -Path "installer-repo" -Filter "hms.iss" -Recurse).FullName
           Write-Host "Found Inno Setup script at: $issFile"
 
+          # AppVersion without the tag's leading "v": it is what Windows shows under Apps.
+          $appVersion = "${{ steps.ver.outputs.VERSION }}".TrimStart('v')
+
           # Run the compiler using the discovered path
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            /DAppVersion="${{ steps.ver.outputs.VERSION }}" `
+            /DAppVersion="$appVersion" `
+            /DLibreOfficeVersion="$env:LO_VERSION" `
             /O"output" `
             "$issFile"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+      - name: Hash the installer
+        id: hash
+        run: |
+          $h = (Get-FileHash output\HMSSetup.exe -Algorithm SHA256).Hash.ToLower()
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "SHA256=$h"
 
       # ── Publish to GitHub Releases ────────────────────────────────────────
 
@@ -139,4 +217,11 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.VERSION }}
           name: "Vyaptek HMS ${{ steps.ver.outputs.VERSION }}"
+          body: |
+            Built from:
+            - hospital_management_backend `${{ steps.refs.outputs.BACKEND }}` (`${{ steps.shas.outputs.BACKEND_SHA }}`)
+            - hms_webapp `${{ steps.refs.outputs.FRONTEND }}` (`${{ steps.shas.outputs.FRONTEND_SHA }}`)
+            - hms_installer `${{ steps.shas.outputs.INSTALLER_SHA }}`
+            - HMSSetup.exe SHA-256 `${{ steps.hash.outputs.SHA256 }}`
+            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, PostgreSQL 18 (binaries-stable)
           files: output\HMSSetup.exe
