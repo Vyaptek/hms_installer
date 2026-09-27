@@ -1,7 +1,14 @@
 @echo off
+rem The superuser password: this box's own once write-secrets.ps1 has changed it (backend plan 24, I3),
+rem else the installer's old fixed one. Arg 3 is the backend's secret file.
 set PGPASSWORD=admin
 set PG_BIN=%~1
 set SQL_FILE=%~2
+set "BOX_CONF=%~3"
+set "BOX_PW="
+if not "%BOX_CONF%"=="" if exist "%BOX_CONF%" (
+  for /f "usebackq tokens=1,* delims==" %%a in ("%BOX_CONF%") do if "%%a"=="spring.datasource.password" set "BOX_PW=%%b"
+)
 set MAX_RETRIES=30
 set ATTEMPT=0
 
@@ -14,6 +21,11 @@ timeout /t 2 /nobreak >nul
 goto wait_loop
 
 :ready
+if defined BOX_PW (
+  set "PGPASSWORD=%BOX_PW%"
+  "%PG_BIN%\psql.exe" -h 127.0.0.1 -U postgres -d postgres -w -c "select 1" >nul 2>&1
+  if errorlevel 1 set PGPASSWORD=admin
+)
 "%PG_BIN%\dropdb.exe"  -U postgres --if-exists hospital_erp
 "%PG_BIN%\createdb.exe" -U postgres hospital_erp
 "%PG_BIN%\psql.exe"    -U postgres -d hospital_erp -f "%SQL_FILE%"

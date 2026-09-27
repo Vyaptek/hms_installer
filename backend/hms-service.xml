@@ -25,7 +25,12 @@
   <logpath>%BASE%\logs</logpath>
   <env name="DB_URL"      value="jdbc:postgresql://127.0.0.1:5432/hospital_erp"/>
   <env name="DB_USERNAME" value="postgres"/>
+  <!-- Only a fallback: write-secrets.ps1 gives each box its own PostgreSQL password in
+       config\application.properties, which wins over this (backend plan 24, I3). -->
   <env name="DB_PASSWORD" value="admin"/>
   <env name="REDIS_HOST"  value="localhost"/>
   <env name="REDIS_PORT"  value="6379"/>
+  <!-- Only nginx on this machine reaches the backend (backend plan 24, I4). The relay pull worker
+       replays callbacks to localhost, which this still serves. -->
+  <env name="SERVER_ADDRESS" value="127.0.0.1"/>
 </service>

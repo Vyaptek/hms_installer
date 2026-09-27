@@ -75,6 +75,11 @@ begin
   Result := ShouldInitDB or ShouldCleanDB;
 end;
 
+function KeepsDatabase: Boolean;
+begin
+  Result := not NeedsAdminPassword;
+end;
+
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   if PageID = DBPage.ID then
@@ -236,30 +241,34 @@ Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\java.msi"" /qn ADDLOCAL=Feature
 Filename: "{tmp}\pg.exe"; Parameters: "--mode unattended --unattendedmodeui none --superpassword ""admin"" --serverport 5432 --prefix ""{app}\pgsql"""; Flags: runhidden; StatusMsg: "Installing PostgreSQL 18..."; Check: ShouldInstallPG
 
 ; 3a. Clean install — drop existing DB, recreate, run SQL
-Filename: "{app}\clean_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"""; Flags: runhidden; StatusMsg: "Resetting database..."; Check: ShouldCleanDB
+Filename: "{app}\clean_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"" ""{app}\backend\config\application.properties"""; Flags: runhidden; StatusMsg: "Resetting database..."; Check: ShouldCleanDB
 
 ; 3b. Fresh install only — create DB and run setup SQL (skipped on upgrades)
-Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"""; Flags: runhidden; StatusMsg: "Initializing database..."; Check: ShouldInitDB
+Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"" ""{app}\backend\config\application.properties"""; Flags: runhidden; StatusMsg: "Initializing database..."; Check: ShouldInitDB
 
-; 4. Redis — use Redis native service installer.
+; 4. The box's own secrets (backend plan 24, C2, C6, I3): the sign-in key (kept on upgrade; a box that
+;    never had one gets one, which logs everyone out once), the admin password on a new database, a
+;    random PostgreSQL superuser password instead of "admin" (again when the database is new) and a
+;    Redis password. Before Redis is (re)installed, so it starts with its password.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"" -NewDatabase"; Flags: runhidden waituntilterminated; StatusMsg: "Generating this computer's keys..."; Check: NeedsAdminPassword; AfterInstall: CheckSecretsWritten
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"""; Flags: runhidden waituntilterminated; StatusMsg: "Checking this computer's keys..."; Check: KeepsDatabase; AfterInstall: CheckSecretsWritten
+
+; 5. Redis — use Redis native service installer.
 ;    Do NOT use sc create; Redis console mode is not a valid Windows service entrypoint.
 Filename: "{app}\redis\redis-install.bat"; Parameters: """{app}\redis"""; Flags: runhidden; StatusMsg: "Registering and starting Redis..."
  
-; 5. Backend — Flyway runs V1-V32 on first boot (may take ~30s on first install)
-;    First the box's own secrets (sign-in key; admin password on a new database). An upgrade keeps
-;    the existing key; a box that never had one gets one, which logs everyone out once.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Generating the sign-in key..."; AfterInstall: CheckSecretsWritten
+; 6. Backend — Flyway runs V1-V32 on first boot (may take ~30s on first install)
 Filename: "{app}\backend\hms-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
 Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."
 
-; 6. Nginx + React frontend
+; 7. Nginx + React frontend
 ;    Free port 80 first -- stop & disable the IIS/HTTP stack (W3SVC/WAS) that
 ;    otherwise squats on port 80 and prevents Nginx from binding.
 Filename: "{app}\free-port-80.bat"; Flags: runhidden; StatusMsg: "Freeing web port 80..."
 Filename: "{app}\nginx-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Web Server..."
 Filename: "{app}\nginx-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting User Interface..."
 
-; 7. Firewall — port 80 only (Redis 6379, PG 5432, backend 8080 are localhost-only)
+; 8. Firewall — port 80 only (Redis 6379, PG 5432, backend 8080 are localhost-only)
 Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall add rule name=""Vyaptek HMS Web"" dir=in action=allow protocol=TCP localport=80 profile=any"""; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
 
 [UninstallRun]
@@ -272,6 +281,6 @@ Filename: "{sys}\sc.exe"; Parameters: "stop VyaptekRedis";   Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "delete VyaptekRedis"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name=""Vyaptek HMS Web"""""; Flags: runhidden; RunOnceId: "RemoveFirewallRule"
 
-[UninstallDelete]
-; The box's secrets. A reinstall gets a fresh sign-in key, which logs everyone out once.
-Type: filesandordirs; Name: "{app}\backend\config"
+; backend\config (the box's secrets) is kept on uninstall on purpose: PostgreSQL is not uninstalled,
+; and that file holds the only copy of its superuser password (backend plan 24, I3). The folder is
+; readable by SYSTEM and Administrators only. Delete it by hand after removing PostgreSQL.
