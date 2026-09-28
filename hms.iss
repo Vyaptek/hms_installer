@@ -6,6 +6,11 @@
 #ifndef LibreOfficeVersion
   #define LibreOfficeVersion "26.2.6.3"
 #endif
+; Vyaptek's ABDM relay. Fixed in the build, not typed at the hospital, so an enrollment code can only
+; ever be sent to Vyaptek.
+#ifndef AbdmRelayUrl
+  #define AbdmRelayUrl "https://api.vyaptek.com"
+#endif
 
 [Setup]
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -33,6 +38,8 @@ var
   LibreOfficeChecked, LibreOfficeNeeded: Boolean;
   DBPage: TInputOptionWizardPage;
   AdminPage: TInputQueryWizardPage;
+  AbdmPage: TInputQueryWizardPage;
+  AbdmResult: String;
 
 procedure InitializeWizard;
 begin
@@ -60,6 +67,69 @@ begin
     'Use at least 10 characters: letters, digits and symbols, no spaces. It is not shown again.');
   AdminPage.Add('Administrator password:', True);
   AdminPage.Add('Confirm password:', True);
+
+  // ABDM (backend docs/ABDM_RELAY_SPEC.md §9.1): only a one-time code from Vyaptek. The ABDM client
+  // id and secret are never typed here or stored on this computer; Vyaptek's relay keeps them.
+  AbdmPage := CreateInputQueryPage(AdminPage.ID,
+    'ABDM (Ayushman Bharat Digital Mission)',
+    'Connect this computer to ABDM. Optional.',
+    '');
+  AbdmPage.Add('Enrollment code from Vyaptek (for example ABCDE-FGHJK-MNPQR-STVWX):', False);
+end;
+
+function ConfigFile: String;
+begin
+  Result := AddBackslash(WizardDirValue) + 'backend\config\application.properties';
+end;
+
+// True once this computer holds a relay token (a previous install, or enroll-abdm.ps1 in this run).
+function IsAbdmEnrolled: Boolean;
+var
+  Lines: TArrayOfString;
+  I: Integer;
+begin
+  Result := False;
+  if not LoadStringsFromFile(ConfigFile, Lines) then
+    Exit;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+    if Pos('abdm.relay.pull.token=', Lines[I]) = 1 then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
+
+function AbdmCode: String;
+begin
+  Result := Trim(AbdmPage.Values[0]);
+end;
+
+function HasAbdmCode: Boolean;
+begin
+  Result := AbdmCode <> '';
+end;
+
+// Letters and digits only, 20 of them once dashes and spaces are dropped; the relay does the rest.
+function LooksLikeAbdmCode(const S: String): Boolean;
+var
+  I, Count: Integer;
+  C: Char;
+begin
+  Result := True;
+  Count := 0;
+  for I := 1 to Length(S) do
+  begin
+    C := S[I];
+    if (C = '-') or (C = ' ') then
+      Continue;
+    if not (((C >= '0') and (C <= '9')) or ((C >= 'A') and (C <= 'Z')) or ((C >= 'a') and (C <= 'z'))) then
+    begin
+      Result := False;
+      Exit;
+    end;
+    Count := Count + 1;
+  end;
+  Result := Count = 20;
 end;
 
 function ShouldInstallPG: Boolean;
@@ -122,6 +192,16 @@ var
   Pw, Problem: String;
 begin
   Result := True;
+  if CurPageID = AbdmPage.ID then
+  begin
+    if HasAbdmCode and not LooksLikeAbdmCode(AbdmCode) then
+    begin
+      MsgBox('An enrollment code has 20 letters and digits, like ABCDE-FGHJK-MNPQR-STVWX. ' +
+        'Check it, or leave the box empty to skip ABDM for now.', mbError, MB_OK);
+      Result := False;
+    end;
+    Exit;
+  end;
   if CurPageID <> AdminPage.ID then
     Exit;
   Pw := AdminPage.Values[0];
@@ -149,13 +229,54 @@ begin
   // read process command lines. {tmp} is private to this run and deleted when it ends.
   if (CurStep = ssInstall) and NeedsAdminPassword and (AdminPage.Values[0] <> '') then
     SaveStringToFile(ExpandConstant('{tmp}\admin-password.txt'), AdminPage.Values[0], False);
+  // Same for the ABDM enrollment code: it works once, but until then it is a credential.
+  if (CurStep = ssInstall) and HasAbdmCode then
+    SaveStringToFile(ExpandConstant('{tmp}\abdm-enroll-code.txt'), AbdmCode, False);
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if (CurPageID = wpFinished) and NeedsAdminPassword and (AdminPage.Values[0] <> '') then
-    WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
-      'Sign in as admin@example.com with the administrator password you chose.';
+  if CurPageID = AbdmPage.ID then
+  begin
+    if IsAbdmEnrolled then
+      AbdmPage.SubCaptionLabel.Caption :=
+        'This computer is already connected to ABDM. Leave the box empty to keep that connection. ' +
+        'Enter a new code only if Vyaptek gave you one to reconnect it.'
+    else
+      AbdmPage.SubCaptionLabel.Caption :=
+        'If this hospital uses ABDM (ABHA, health record linking, Scan & Share), enter the one-time ' +
+        'code Vyaptek gave you. The installer connects to Vyaptek to set ABDM up. Leave it empty to ' +
+        'skip; it can be done later.';
+  end;
+  if CurPageID = wpFinished then
+  begin
+    if NeedsAdminPassword and (AdminPage.Values[0] <> '') then
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
+        'Sign in as admin@example.com with the administrator password you chose.';
+    if AbdmResult <> '' then
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + AbdmResult;
+  end;
+end;
+
+// enroll-abdm.ps1 leaves one line in the result file. A failure does not stop the install: the rest
+// of HMS works without ABDM, and the script can be run again later.
+procedure CheckAbdmEnrolled;
+var
+  Msg: AnsiString;
+begin
+  if not LoadStringFromFile(ExpandConstant('{tmp}\abdm-enroll-result.txt'), Msg) then
+    Msg := 'The ABDM setup did not report back.';
+  AbdmResult := Trim(String(Msg));
+  if Pos('This computer is connected to ABDM', AbdmResult) = 1 then
+  begin
+    AbdmResult := AbdmResult + ' Next, enter the facility id in Utility > ABDM Facility Config and ' +
+      'each doctor''s HPR id in Consultant Master.';
+    Exit;
+  end;
+  AbdmResult := 'ABDM was not set up: ' + AbdmResult + ' To try again with a new code, as an administrator run: ' +
+    'powershell -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\enroll-abdm.ps1') +
+    '" -ConfigDir "' + ExpandConstant('{app}\backend\config') + '" -RestartService';
+  SuppressibleMsgBox(AbdmResult, mbError, MB_OK, IDOK);
 end;
 
 // Without the secret file the backend refuses to start, so say so rather than finish quietly.
@@ -249,6 +370,9 @@ Source: "free-port-80.bat";   DestDir: "{app}"
 Source: "backend\*"; DestDir: "{app}\backend"; Excludes: "\config,\config\*"; Flags: recursesubdirs createallsubdirs
 ;    Kept on the box: it also gives an already-installed box its own secret (backend plan 24 §10).
 Source: "write-secrets.ps1"; DestDir: "{app}"
+;    ABDM: connect with a one-time code (also run by hand later), and keep the clock right for it.
+Source: "enroll-abdm.ps1"; DestDir: "{app}"
+Source: "time-sync.ps1";   DestDir: "{app}"
 
 ; 4. Frontend (React/Vite build — assets/, index.html, etc.)
 Source: "frontend\*"; DestDir: "{app}\frontend"; Excludes: "*.map"; Flags: recursesubdirs createallsubdirs
@@ -287,6 +411,12 @@ Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_da
 ;    Redis password. Before Redis is (re)installed, so it starts with its password.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"" -NewDatabase"; Flags: runhidden waituntilterminated; StatusMsg: "Generating this computer's keys..."; Check: NeedsAdminPassword; AfterInstall: CheckSecretsWritten
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"""; Flags: runhidden waituntilterminated; StatusMsg: "Checking this computer's keys..."; Check: KeepsDatabase; AfterInstall: CheckSecretsWritten
+
+; 3b. ABDM, when a code was entered: redeem it with Vyaptek's relay and write this box's ABDM settings
+;     into the secret file from step 3. Before the backend starts, so it starts with them.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\enroll-abdm.ps1"" -ConfigDir ""{app}\backend\config"" -RelayUrl ""{#AbdmRelayUrl}"" -CodeFile ""{tmp}\abdm-enroll-code.txt"" -ResultFile ""{tmp}\abdm-enroll-result.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Connecting to ABDM..."; Check: HasAbdmCode; AfterInstall: CheckAbdmEnrolled
+; 3c. ABDM refuses replies stamped more than ~15 minutes off, so keep the clock synced.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\time-sync.ps1"""; Flags: runhidden waituntilterminated; StatusMsg: "Setting up time sync..."; Check: IsAbdmEnrolled
 
 ; 4. Redis — use Redis native service installer.
 ;    Do NOT use sc create; Redis console mode is not a valid Windows service entrypoint.
