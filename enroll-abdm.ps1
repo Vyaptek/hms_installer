@@ -1,11 +1,15 @@
 <#
-  Connects this box to Vyaptek's ABDM relay with a one-time enrollment code (backend
-  docs/ABDM_RELAY_SPEC.md §9.1, decided 2026-09-28).
+  Connects this box to Vyaptek's ABDM relay (backend docs/ABDM_RELAY_SPEC.md §9.1, decided 2026-09-28),
+  with either credential Vyaptek gives a hospital:
 
-  A Vyaptek operator creates the code on the relay for this hospital (POST
-  /api/relay/boxes/{boxId}/enrollment-code). This script redeems it at {RelayUrl}/relay/v1/enroll and
-  writes what comes back into backend\config\application.properties, the file write-secrets.ps1
-  locked to SYSTEM and Administrators:
+  - the hospital's product key (-ProductKeyFile), when its license includes ABDM (backend
+    optimization/26_PRODUCT_KEY_LICENSING.md §9, 2026-09-29). The installer uses this, so the hospital
+    types one key. Redeemed at {RelayUrl}/license/v1/abdm/enroll.
+  - a one-time enrollment code (-CodeFile), which a Vyaptek operator creates on the relay (POST
+    /api/relay/boxes/{boxId}/enrollment-code). Redeemed at {RelayUrl}/relay/v1/enroll.
+
+  Either way, what comes back is written into backend\config\application.properties, the file
+  write-secrets.ps1 locked to SYSTEM and Administrators:
 
   - the box id and its relay token (abdm.relay.pull.*), which the box uses to pull ABDM callbacks and
     to borrow ABDM sessions from the relay;
@@ -16,19 +20,22 @@
   short-lived session tokens. Any abdm.client-id or abdm.client-secret line in the file is removed.
   If this box's token leaks, Vyaptek rotates that one token; no other hospital is affected.
 
-  A code works once and expires (48 hours by default). The code reaches this script in a file that is
-  deleted at once, never on the command line, where other users could read it.
+  A code works once and expires (48 hours by default); a product key can be used again, and each use
+  gives the box a new relay token, so the server that used it last is the one connected. Either reaches
+  this script in a file that is deleted at once, never on the command line, where other users could
+  read it.
 
   Writes a one-line result to -ResultFile (for the installer to show) and exits 0 on success, 2 when
   the relay refused the code, 3 when the relay could not be reached, 1 on anything else.
 
-  By hand, as an administrator (asks for the code, then restarts the backend):
+  By hand, as an administrator (asks for the product key or code, then restarts the backend):
     powershell -ExecutionPolicy Bypass -File enroll-abdm.ps1 -ConfigDir "<HMS>\backend\config" -RestartService
 #>
 param(
   [Parameter(Mandatory = $true)][string]$ConfigDir,
   [string]$RelayUrl = 'https://api.vyaptek.com',
   [string]$CodeFile,
+  [string]$ProductKeyFile,
   [string]$ResultFile,
   [switch]$RestartService
 )
@@ -45,18 +52,26 @@ function Set-Prop([string[]]$lines, [string]$key, [string]$value) {
   return @($lines | Where-Object { -not $_.StartsWith("$key=") }) + "$key=$value"
 }
 
-# The code: from the installer's file (deleted at once), else asked for.
-$code = ''
-if ($CodeFile) {
-  if (Test-Path $CodeFile) {
-    $raw = Get-Content -Raw $CodeFile
-    Remove-Item -Force $CodeFile
-    if ($raw) { $code = $raw.Trim() }
-  }
-} else {
-  $code = (Read-Host 'ABDM enrollment code from Vyaptek').Trim()
+function Read-Once([string]$path) {
+  if (-not (Test-Path $path)) { return '' }
+  $raw = Get-Content -Raw $path
+  Remove-Item -Force $path
+  if ($raw) { return $raw.Trim() } else { return '' }
 }
-if (-not $code) { Write-Result 1 'No enrollment code was given, so ABDM was not set up.' }
+
+# The credential: from the installer's file (deleted at once), else asked for. A product key starts
+# with HMS-; anything else is taken as an enrollment code.
+$code = ''
+if ($ProductKeyFile) {
+  $code = Read-Once $ProductKeyFile
+} elseif ($CodeFile) {
+  $code = Read-Once $CodeFile
+} else {
+  $code = (Read-Host 'Product key (HMS-...) or ABDM enrollment code from Vyaptek').Trim()
+}
+if (-not $code) { Write-Result 1 'No product key or enrollment code was given, so ABDM was not set up.' }
+$isProductKey = $code -match "^HMS[-\s]"
+
 
 # Only HTTPS, so the token cannot be read or replaced on the way. Plain HTTP to this machine is allowed
 # for testing against a local relay.
@@ -72,11 +87,22 @@ if (-not (Test-Path $file)) {
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 try {
-  $body = @{ code = $code } | ConvertTo-Json -Compress
-  $response = Invoke-RestMethod -Method Post -Uri "$relay/relay/v1/enroll" -ContentType 'application/json' -Body $body -TimeoutSec 30
+  if ($isProductKey) {
+    $body = @{ productKey = $code } | ConvertTo-Json -Compress
+    $response = Invoke-RestMethod -Method Post -Uri "$relay/license/v1/abdm/enroll" -ContentType 'application/json' -Body $body -TimeoutSec 30
+  } else {
+    $body = @{ code = $code } | ConvertTo-Json -Compress
+    $response = Invoke-RestMethod -Method Post -Uri "$relay/relay/v1/enroll" -ContentType 'application/json' -Body $body -TimeoutSec 30
+  }
 } catch {
   $status = $null
   if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+  if ($status -eq 401 -and $isProductKey) {
+    Write-Result 2 'Vyaptek refused the product key: it is wrong, or the license is suspended.'
+  }
+  if ($status -eq 422 -and $isProductKey) {
+    Write-Result 2 'This license does not include ABDM. Ask Vyaptek to add it.'
+  }
   if ($status -eq 401) {
     Write-Result 2 'The relay refused the enrollment code: it is wrong, was already used, or has expired. Ask Vyaptek for a new code.'
   }

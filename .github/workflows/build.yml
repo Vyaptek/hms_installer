@@ -99,6 +99,12 @@ jobs:
           }
           Write-Host "Version: $v"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "VERSION=$v"
+          # The release date, stamped into the jar and the installer (backend
+          # optimization/26_PRODUCT_KEY_LICENSING.md §3.7): a perpetual license covers releases up to its
+          # AMC end, and the installer asks before replacing anything. India's date, as the licenses use.
+          $d = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::UtcNow, "India Standard Time").ToString("yyyy-MM-dd")
+          Write-Host "Release date: $d"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "RELEASE_DATE=$d"
 
       # ── Build frontend dist ───────────────────────────────────────────────
 
@@ -129,7 +135,8 @@ jobs:
 
       - name: Build backend JAR
         working-directory: backend-src
-        run: ./gradlew bootJar --no-daemon
+        # Version and release date go into the jar's build-info, which the license check reads.
+        run: ./gradlew bootJar --no-daemon "-PappVersion=$("${{ steps.ver.outputs.VERSION }}".TrimStart('v'))" "-PreleaseDate=${{ steps.ver.outputs.RELEASE_DATE }}"
 
       # ── Download large binaries from binaries-stable release ─────────────
 
@@ -200,6 +207,7 @@ jobs:
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             /DAppVersion="$appVersion" `
             /DLibreOfficeVersion="$env:LO_VERSION" `
+            /DAppReleaseDate="${{ steps.ver.outputs.RELEASE_DATE }}" `
             /O"output" `
             "$issFile"
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }

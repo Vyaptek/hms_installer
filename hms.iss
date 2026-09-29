@@ -11,6 +11,16 @@
 #ifndef AbdmRelayUrl
   #define AbdmRelayUrl "https://api.vyaptek.com"
 #endif
+; Vyaptek's license server (backend optimization/26_PRODUCT_KEY_LICENSING.md), on the same host. Fixed
+; in the build for the same reason: a product key is only ever sent to Vyaptek.
+#ifndef LicenseServerUrl
+  #define LicenseServerUrl AbdmRelayUrl
+#endif
+; This release's date (yyyy-MM-dd), set by CI (/DAppReleaseDate). A perpetual license covers releases up
+; to its AMC end; blank on a local build, which skips that check.
+#ifndef AppReleaseDate
+  #define AppReleaseDate ""
+#endif
 
 [Setup]
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -38,8 +48,16 @@ var
   LibreOfficeChecked, LibreOfficeNeeded: Boolean;
   DBPage: TInputOptionWizardPage;
   AdminPage: TInputQueryWizardPage;
-  AbdmPage: TInputQueryWizardPage;
-  AbdmResult: String;
+  LicensePage: TInputQueryWizardPage;
+  // From validate-license.ps1 on the license page: who the key belongs to, and whether it includes ABDM.
+  LicenseCustomer: String;
+  LicenseIncludesAbdm: Boolean;
+  // Whether this computer was connected to ABDM before this run (worked out at install time).
+  AbdmWasEnrolled: Boolean;
+  AbdmResult, LicenseResult: String;
+  // True when the key was skipped on a computer without one: HMS then opens read-only until an
+  // administrator enters it (backend optimization/26 §12; the super admin can always sign in to do so).
+  LicenseSkipped: Boolean;
 
 procedure InitializeWizard;
 begin
@@ -68,13 +86,14 @@ begin
   AdminPage.Add('Administrator password:', True);
   AdminPage.Add('Confirm password:', True);
 
-  // ABDM (backend docs/ABDM_RELAY_SPEC.md §9.1): only a one-time code from Vyaptek. The ABDM client
-  // id and secret are never typed here or stored on this computer; Vyaptek's relay keeps them.
-  AbdmPage := CreateInputQueryPage(AdminPage.ID,
-    'ABDM (Ayushman Bharat Digital Mission)',
-    'Connect this computer to ABDM. Optional.',
+  // The product key (backend optimization/26_PRODUCT_KEY_LICENSING.md, phase 7). Checked online on
+  // Next. When the license includes ABDM the same key also connects this computer to ABDM (§9), so the
+  // hospital types one key; the ABDM client id and secret are never typed here or stored on this computer.
+  LicensePage := CreateInputQueryPage(AdminPage.ID,
+    'Product Key',
+    'Enter the product key Vyaptek gave this hospital.',
     '');
-  AbdmPage.Add('Enrollment code from Vyaptek (for example ABCDE-FGHJK-MNPQR-STVWX):', False);
+  LicensePage.Add('Product key (for example HMS-ABCDE-FGHJK-MNPQR-STVWX):', False);
 end;
 
 function ConfigFile: String;
@@ -99,37 +118,151 @@ begin
     end;
 end;
 
-function AbdmCode: String;
+function LicenseKey: String;
 begin
-  Result := Trim(AbdmPage.Values[0]);
+  Result := Trim(LicensePage.Values[0]);
 end;
 
-function HasAbdmCode: Boolean;
+function HasLicenseKey: Boolean;
 begin
-  Result := AbdmCode <> '';
+  Result := LicenseKey <> '';
 end;
 
-// Letters and digits only, 20 of them once dashes and spaces are dropped; the relay does the rest.
-function LooksLikeAbdmCode(const S: String): Boolean;
+// The backend writes this (the installation's id) once it has activated a key. The upgrade guard asks
+// the license server about that installation.
+function ActivatedMarker: String;
+begin
+  Result := AddBackslash(WizardDirValue) + 'backend\config\license-activated';
+end;
+
+function IsLicenseActivated: Boolean;
+begin
+  Result := FileExists(ActivatedMarker);
+end;
+
+// HMS then 20 letters and digits, once dashes and spaces are dropped; the license server does the rest.
+function LooksLikeProductKey(const S: String): Boolean;
 var
-  I, Count: Integer;
+  I: Integer;
   C: Char;
+  Compact: String;
 begin
-  Result := True;
-  Count := 0;
+  Result := False;
+  Compact := '';
   for I := 1 to Length(S) do
   begin
     C := S[I];
     if (C = '-') or (C = ' ') then
       Continue;
     if not (((C >= '0') and (C <= '9')) or ((C >= 'A') and (C <= 'Z')) or ((C >= 'a') and (C <= 'z'))) then
+      Exit;
+    Compact := Compact + C;
+  end;
+  Result := (Length(Compact) = 23) and (CompareText(Copy(Compact, 1, 3), 'HMS') = 0);
+end;
+
+// The value of key= in validate-license.ps1's result lines, or ''.
+function ResultValue(const Lines: TArrayOfString; const Key: String): String;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to GetArrayLength(Lines) - 1 do
+    if Pos(Key + '=', Lines[I]) = 1 then
     begin
-      Result := False;
+      Result := Trim(Copy(Lines[I], Length(Key) + 2, Length(Lines[I])));
       Exit;
     end;
-    Count := Count + 1;
+end;
+
+// Runs validate-license.ps1 (extracted to {tmp}) and reads its result lines. False when it left none.
+function RunLicenseScript(const Params: String; var Lines: TArrayOfString): Boolean;
+var
+  ResultFile: String;
+  Code: Integer;
+begin
+  ExtractTemporaryFile('validate-license.ps1');
+  ResultFile := ExpandConstant('{tmp}\license-result.txt');
+  DeleteFile(ResultFile);
+  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\validate-license.ps1') +
+    '" -ServerUrl "{#LicenseServerUrl}" -ReleaseDate "{#AppReleaseDate}" -AppVersion "{#AppVersion}" -ResultFile "' +
+    ResultFile + '" ' + Params, '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Result := LoadStringsFromFile(ResultFile, Lines) and (ResultValue(Lines, 'status') <> '');
+  DeleteFile(ResultFile);
+end;
+
+// A typed key: valid, and covering this build? Shows whose it is and asks to go on.
+function CheckProductKey: Boolean;
+var
+  KeyFile, Status, Msg, Seats: String;
+  Lines: TArrayOfString;
+begin
+  Result := False;
+  if not LooksLikeProductKey(LicenseKey) then
+  begin
+    MsgBox('A product key looks like HMS-ABCDE-FGHJK-MNPQR-STVWX. Check it and try again.', mbError, MB_OK);
+    Exit;
   end;
-  Result := Count = 20;
+  // In a file, never on a command line, where other users could read it. {tmp} is private to this run.
+  KeyFile := ExpandConstant('{tmp}\license-check.txt');
+  SaveStringToFile(KeyFile, LicenseKey, False);
+  try
+    if not RunLicenseScript('-Mode Check -KeyFile "' + KeyFile + '"', Lines) then
+    begin
+      MsgBox('The product key could not be checked. Try again, or send this message to Vyaptek.', mbError, MB_OK);
+      Exit;
+    end;
+  finally
+    DeleteFile(KeyFile);
+  end;
+  Status := ResultValue(Lines, 'status');
+  Msg := ResultValue(Lines, 'message');
+  if Status = 'OFFLINE' then
+  begin
+    MsgBox(Msg + #13#10#13#10 + 'The product key is checked online once, during installation.', mbError, MB_OK);
+    Exit;
+  end;
+  if Status <> 'OK' then
+  begin
+    MsgBox(Msg, mbError, MB_OK);
+    Exit;
+  end;
+  LicenseCustomer := ResultValue(Lines, 'customer');
+  LicenseIncludesAbdm := ResultValue(Lines, 'abdm') = 'true';
+  Seats := ResultValue(Lines, 'seats');
+  Msg := 'This product key belongs to ' + LicenseCustomer + ' (' + ResultValue(Lines, 'licenseId') + ').';
+  if Seats <> '' then
+    Msg := Msg + #13#10 + Seats + ' workstations can use HMS at the same time.';
+  if LicenseIncludesAbdm then
+    Msg := Msg + #13#10 + 'ABDM is included; this key also connects this computer to ABDM.';
+  Result := MsgBox(Msg + #13#10#13#10 + 'Continue?', mbConfirmation, MB_YESNO) = IDYES;
+end;
+
+// An upgrade with no new key: may this build run under the license already activated here? Asked
+// before any file is replaced, so a hospital whose AMC has ended keeps its working version.
+function CheckUpgradeEntitled: Boolean;
+var
+  Status, Msg: String;
+  Lines: TArrayOfString;
+begin
+  Result := True;
+  if not RunLicenseScript('-Mode Upgrade -InstallIdFile "' + ActivatedMarker + '"', Lines) then
+    Status := 'ERROR'
+  else
+    Status := ResultValue(Lines, 'status');
+  Msg := ResultValue(Lines, 'message');
+  if Status = 'OK' then
+    Exit;
+  if Status = 'NOT_ENTITLED' then
+  begin
+    MsgBox(Msg + #13#10#13#10 + 'Nothing was changed; this computer keeps the version it has. Cancel the ' +
+      'installation, or enter a renewed product key.', mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+  Result := MsgBox('Could not confirm with Vyaptek that this version is covered by the license (' + Msg + ').' +
+    #13#10#13#10 + 'If the update period (AMC) has ended, HMS turns read-only after this upgrade. Continue anyway?',
+    mbConfirmation, MB_YESNO) = IDYES;
 end;
 
 function ShouldInstallPG: Boolean;
@@ -192,13 +325,21 @@ var
   Pw, Problem: String;
 begin
   Result := True;
-  if CurPageID = AbdmPage.ID then
+  if CurPageID = LicensePage.ID then
   begin
-    if HasAbdmCode and not LooksLikeAbdmCode(AbdmCode) then
+    LicenseIncludesAbdm := False;
+    LicenseSkipped := False;
+    if HasLicenseKey then
+      Result := CheckProductKey
+    else if IsLicenseActivated then
+      Result := CheckUpgradeEntitled
+    else
     begin
-      MsgBox('An enrollment code has 20 letters and digits, like ABCDE-FGHJK-MNPQR-STVWX. ' +
-        'Check it, or leave the box empty to skip ABDM for now.', mbError, MB_OK);
-      Result := False;
+      LicenseSkipped := MsgBox('Continue without a product key?' + #13#10#13#10 +
+        'HMS will open read-only: records can be viewed and printed, not changed, until an administrator ' +
+        'signs in (as admin@example.com) and enters the key in Utility > License. That needs internet.',
+        mbConfirmation, MB_YESNO) = IDYES;
+      Result := LicenseSkipped;
     end;
     Exit;
   end;
@@ -229,30 +370,41 @@ begin
   // read process command lines. {tmp} is private to this run and deleted when it ends.
   if (CurStep = ssInstall) and NeedsAdminPassword and (AdminPage.Values[0] <> '') then
     SaveStringToFile(ExpandConstant('{tmp}\admin-password.txt'), AdminPage.Values[0], False);
-  // Same for the ABDM enrollment code: it works once, but until then it is a credential.
-  if (CurStep = ssInstall) and HasAbdmCode then
-    SaveStringToFile(ExpandConstant('{tmp}\abdm-enroll-code.txt'), AbdmCode, False);
+  // Same for the product key: once for the backend to activate, once for ABDM when the license has it
+  // and this computer is not connected yet (each script deletes its copy).
+  if CurStep = ssInstall then
+  begin
+    AbdmWasEnrolled := IsAbdmEnrolled;
+    if HasLicenseKey then
+      SaveStringToFile(ExpandConstant('{tmp}\license-key.txt'), LicenseKey, False);
+    if HasLicenseKey and LicenseIncludesAbdm and not AbdmWasEnrolled then
+      SaveStringToFile(ExpandConstant('{tmp}\abdm-product-key.txt'), LicenseKey, False);
+  end;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if CurPageID = AbdmPage.ID then
+  if CurPageID = LicensePage.ID then
   begin
-    if IsAbdmEnrolled then
-      AbdmPage.SubCaptionLabel.Caption :=
-        'This computer is already connected to ABDM. Leave the box empty to keep that connection. ' +
-        'Enter a new code only if Vyaptek gave you one to reconnect it.'
+    if IsLicenseActivated then
+      LicensePage.SubCaptionLabel.Caption :=
+        'This computer already has an activated product key. Leave the box empty to keep it; the ' +
+        'installer checks with Vyaptek that this version is covered. Enter a key only if Vyaptek gave ' +
+        'you a new one.'
     else
-      AbdmPage.SubCaptionLabel.Caption :=
-        'If this hospital uses ABDM (ABHA, health record linking, Scan & Share), enter the one-time ' +
-        'code Vyaptek gave you. The installer connects to Vyaptek to set ABDM up. Leave it empty to ' +
-        'skip; it can be done later.';
+      LicensePage.SubCaptionLabel.Caption :=
+        'The installer checks the key with Vyaptek, so this computer needs internet now. It decides ' +
+        'which modules this hospital can use and how many computers at once. If the license includes ' +
+        'ABDM, the same key sets ABDM up. Without a key HMS opens read-only until an administrator ' +
+        'enters it in Utility > License.';
   end;
   if CurPageID = wpFinished then
   begin
     if NeedsAdminPassword and (AdminPage.Values[0] <> '') then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
         'Sign in as admin@example.com with the administrator password you chose.';
+    if LicenseResult <> '' then
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + LicenseResult;
     if AbdmResult <> '' then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + AbdmResult;
   end;
@@ -273,10 +425,50 @@ begin
       'each doctor''s HPR id in Consultant Master.';
     Exit;
   end;
-  AbdmResult := 'ABDM was not set up: ' + AbdmResult + ' To try again with a new code, as an administrator run: ' +
+  AbdmResult := 'ABDM was not set up: ' + AbdmResult + ' To try again, as an administrator run (it asks for the product key): ' +
     'powershell -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\enroll-abdm.ps1') +
     '" -ConfigDir "' + ExpandConstant('{app}\backend\config') + '" -RestartService';
   SuppressibleMsgBox(AbdmResult, mbError, MB_OK, IDOK);
+end;
+
+// validate-license.ps1 -Mode Install leaves one status line. A failure does not stop the install: an
+// administrator can enter the key in Utility > License after signing in.
+procedure CheckLicenseInstalled;
+var
+  Lines: TArrayOfString;
+begin
+  if LoadStringsFromFile(ExpandConstant('{tmp}\license-install-result.txt'), Lines) and
+     (ResultValue(Lines, 'status') = 'OK') then
+    LicenseResult := 'HMS is licensed to ' + LicenseCustomer + '. The product key is activated when HMS starts.'
+  else
+  begin
+    LicenseResult := 'The product key could not be saved for HMS. After signing in, an administrator can enter ' +
+      'it in Utility > License.';
+    SuppressibleMsgBox(LicenseResult, mbError, MB_OK, IDOK);
+  end;
+end;
+
+// validate-license.ps1 -Mode RequireKey leaves one status line.
+procedure CheckKeyRequired;
+var
+  Lines: TArrayOfString;
+begin
+  if LoadStringsFromFile(ExpandConstant('{tmp}\license-install-result.txt'), Lines) and
+     (ResultValue(Lines, 'status') = 'OK') then
+    LicenseResult := 'No product key was entered, so HMS opens read-only. Sign in as admin@example.com and ' +
+      'enter the key in Utility > License.'
+  else
+    LicenseResult := 'No product key was entered. Sign in as admin@example.com and enter it in Utility > License.';
+end;
+
+function KeyWasSkipped: Boolean;
+begin
+  Result := LicenseSkipped;
+end;
+
+function ShouldEnrollAbdm: Boolean;
+begin
+  Result := HasLicenseKey and LicenseIncludesAbdm and not AbdmWasEnrolled;
 end;
 
 // Without the secret file the backend refuses to start, so say so rather than finish quietly.
@@ -370,9 +562,13 @@ Source: "free-port-80.bat";   DestDir: "{app}"
 Source: "backend\*"; DestDir: "{app}\backend"; Excludes: "\config,\config\*"; Flags: recursesubdirs createallsubdirs
 ;    Kept on the box: it also gives an already-installed box its own secret (backend plan 24 §10).
 Source: "write-secrets.ps1"; DestDir: "{app}"
-;    ABDM: connect with a one-time code (also run by hand later), and keep the clock right for it.
+;    ABDM: connect with the product key or a one-time code (also run by hand later), and keep the
+;    clock right for it.
 Source: "enroll-abdm.ps1"; DestDir: "{app}"
 Source: "time-sync.ps1";   DestDir: "{app}"
+;    The product key: checked on the license page (extracted to {tmp} there), then handed to the backend.
+Source: "validate-license.ps1"; Flags: dontcopy
+Source: "validate-license.ps1"; DestDir: "{app}"
 
 ; 4. Frontend (React/Vite build — assets/, index.html, etc.)
 Source: "frontend\*"; DestDir: "{app}\frontend"; Excludes: "*.map"; Flags: recursesubdirs createallsubdirs
@@ -412,9 +608,15 @@ Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_da
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"" -NewDatabase"; Flags: runhidden waituntilterminated; StatusMsg: "Generating this computer's keys..."; Check: NeedsAdminPassword; AfterInstall: CheckSecretsWritten
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"""; Flags: runhidden waituntilterminated; StatusMsg: "Checking this computer's keys..."; Check: KeepsDatabase; AfterInstall: CheckSecretsWritten
 
-; 3b. ABDM, when a code was entered: redeem it with Vyaptek's relay and write this box's ABDM settings
-;     into the secret file from step 3. Before the backend starts, so it starts with them.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\enroll-abdm.ps1"" -ConfigDir ""{app}\backend\config"" -RelayUrl ""{#AbdmRelayUrl}"" -CodeFile ""{tmp}\abdm-enroll-code.txt"" -ResultFile ""{tmp}\abdm-enroll-result.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Connecting to ABDM..."; Check: HasAbdmCode; AfterInstall: CheckAbdmEnrolled
+; 3a. The product key, when one was entered: into the locked config folder from step 3, for the backend
+;     to activate at its first start (it then deletes the file and writes license-activated).
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\validate-license.ps1"" -Mode Install -KeyFile ""{tmp}\license-key.txt"" -ConfigDir ""{app}\backend\config"" -ResultFile ""{tmp}\license-install-result.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Saving the product key..."; Check: HasLicenseKey; AfterInstall: CheckLicenseInstalled
+; 3a'. No key entered on a computer without one: HMS opens read-only until an administrator enters it.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\validate-license.ps1"" -Mode RequireKey -ConfigDir ""{app}\backend\config"" -ResultFile ""{tmp}\license-install-result.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Recording that the product key is still to be entered..."; Check: KeyWasSkipped; AfterInstall: CheckKeyRequired
+; 3b. ABDM, when the license includes it and this computer is not connected yet: redeem the product key
+;     with Vyaptek and write this box's ABDM settings into the secret file from step 3. Before the
+;     backend starts, so it starts with them.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\enroll-abdm.ps1"" -ConfigDir ""{app}\backend\config"" -RelayUrl ""{#AbdmRelayUrl}"" -ProductKeyFile ""{tmp}\abdm-product-key.txt"" -ResultFile ""{tmp}\abdm-enroll-result.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Connecting to ABDM..."; Check: ShouldEnrollAbdm; AfterInstall: CheckAbdmEnrolled
 ; 3c. ABDM refuses replies stamped more than ~15 minutes off, so keep the clock synced.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\time-sync.ps1"""; Flags: runhidden waituntilterminated; StatusMsg: "Setting up time sync..."; Check: IsAbdmEnrolled
 
