@@ -6,8 +6,8 @@
 #ifndef LibreOfficeVersion
   #define LibreOfficeVersion "26.2.6.3"
 #endif
-; Vyaptek's ABDM relay. Fixed in the build, not typed at the hospital, so an enrollment code can only
-; ever be sent to Vyaptek.
+; Vyaptek's ABDM relay. Fixed in the build, not typed at the hospital, so the product key used to set
+; ABDM up can only ever be sent to Vyaptek.
 #ifndef AbdmRelayUrl
   #define AbdmRelayUrl "https://api.vyaptek.com"
 #endif
