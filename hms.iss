@@ -35,6 +35,10 @@ OutputBaseFilename=HMSSetup
 PrivilegesRequired=admin
 MinVersion=10.0
 CloseApplications=yes
+; %TEMP%\Setup Log <date> #<n>.txt: records each [Run] step's exit code, so a hidden script that failed
+; (write-secrets.ps1, for one) can be traced afterwards. Secrets go to scripts through files, never on a
+; command line; the one exception is pg.exe's fixed "admin", which write-secrets.ps1 replaces at once.
+SetupLogging=yes
 
 [Dirs]
 ; nginx requires these directories to exist before it will start
@@ -471,15 +475,44 @@ begin
   Result := HasLicenseKey and LicenseIncludesAbdm and not AbdmWasEnrolled;
 end;
 
-// Without the secret file the backend refuses to start, so say so rather than finish quietly.
-procedure CheckSecretsWritten;
+// The password on the last "requirepass" line of the Redis config (the one Redis uses), or ''.
+function RedisRequirePass(const Conf: TArrayOfString): String;
+var
+  I: Integer;
 begin
-  if not FileExists(ExpandConstant('{app}\backend\config\application.properties')) then
+  Result := '';
+  for I := 0 to GetArrayLength(Conf) - 1 do
+    if Pos('requirepass ', Conf[I]) = 1 then
+      Result := Trim(Copy(Conf[I], Length('requirepass ') + 1, Length(Conf[I])));
+end;
+
+// Without the secret file the backend refuses to start, so say so rather than finish quietly. The same
+// for a Redis password that the Redis config does not carry: every sign-in then answers "Sign-in is
+// temporarily unavailable". Seen 2026-09-30 on a box whose redis.windows-service.conf had no
+// requirepass while application.properties had a Redis password; write-secrets.ps1 runs hidden, so
+// a run that stopped before its Redis step went unnoticed.
+procedure CheckSecretsWritten;
+var
+  Props, Conf: TArrayOfString;
+  RedisPw, Fix: String;
+begin
+  Fix := 'As an administrator run: powershell -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{app}\write-secrets.ps1') + '" -ConfigDir "' + ExpandConstant('{app}\backend\config') +
+    '" -RedisConf "' + ExpandConstant('{app}\redis\redis.windows-service.conf') +
+    '", then restart the VyaptekRedis and VyaptekHMS services.';
+  if not LoadStringsFromFile(ExpandConstant('{app}\backend\config\application.properties'), Props) then
+  begin
     SuppressibleMsgBox('The sign-in key file could not be created in ' +
-      ExpandConstant('{app}\backend\config') + '. The HMS backend will not start until it exists. ' +
-      'As an administrator run: powershell -ExecutionPolicy Bypass -File "' +
-      ExpandConstant('{app}\write-secrets.ps1') + '" -ConfigDir "' + ExpandConstant('{app}\backend\config') +
-      '", then start the VyaptekHMS service.',
+      ExpandConstant('{app}\backend\config') + '. The HMS backend will not start until it exists. ' + Fix,
+      mbCriticalError, MB_OK, IDOK);
+    Exit;
+  end;
+  RedisPw := ResultValue(Props, 'spring.data.redis.password');
+  if not LoadStringsFromFile(ExpandConstant('{app}\redis\redis.windows-service.conf'), Conf) then
+    SetArrayLength(Conf, 0);
+  if (RedisPw = '') or (RedisRequirePass(Conf) <> RedisPw) then
+    SuppressibleMsgBox('The Redis password was not set up: application.properties and ' +
+      'redis.windows-service.conf do not agree, so nobody will be able to sign in. ' + Fix,
       mbCriticalError, MB_OK, IDOK);
 end;
 
