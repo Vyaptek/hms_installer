@@ -83,11 +83,12 @@ begin
   DBPage.Add('Fresh install — reinstall PostgreSQL and delete ALL hospital data (cannot be undone)');
   DBPage.SelectedValueIndex := 0;
 
-  // A new database seeds admin@example.com with a password that is public (it is in the backend's
-  // migrations). The password chosen here replaces it at the backend's first start.
+  // A new database seeds admin@vyaptek.com (backend V154; admin@example.com before 2026-10-01) with a
+  // password that is public (it is in the backend's migrations). The password chosen here replaces it at
+  // the backend's first start.
   AdminPage := CreateInputQueryPage(DBPage.ID,
     'Administrator Password',
-    'Choose the password for the admin@example.com account.',
+    'Choose the password for the admin@vyaptek.com account.',
     'The hospital database is new, so its administrator account needs a password. ' +
     'Use at least 10 characters: letters, digits and symbols, no spaces. It is not shown again.');
   AdminPage.Add('Administrator password:', True);
@@ -296,6 +297,16 @@ begin
   Result := ShouldInitDB or ShouldCleanDB;
 end;
 
+// Who to sign in as. A new database's admin is admin@vyaptek.com (backend V154); on a kept database it
+// may still be admin@example.com, so an upgrade names no account.
+function AdminSignIn: String;
+begin
+  if NeedsAdminPassword then
+    Result := 'admin@vyaptek.com'
+  else
+    Result := 'an administrator';
+end;
+
 function KeepsDatabase: Boolean;
 begin
   Result := not NeedsAdminPassword;
@@ -343,8 +354,8 @@ begin
     else
     begin
       LicenseSkipped := MsgBox('Continue without a product key?' + #13#10#13#10 +
-        'HMS will open read-only: records can be viewed and printed, not changed, until an administrator ' +
-        'signs in (as admin@example.com) and enters the key in Utility > License. That needs internet.',
+        'HMS will open read-only: records can be viewed and printed, not changed, until you sign in as ' +
+        AdminSignIn + ' and enter the key in Utility > License. That needs internet.',
         mbConfirmation, MB_YESNO) = IDYES;
       Result := LicenseSkipped;
     end;
@@ -362,7 +373,7 @@ begin
     Problem := 'The password must be at most 72 characters.'
   else if not IsPrintableAsciiWithoutSpace(Pw) then
     Problem := 'Use English letters, digits and symbols only, without spaces.'
-  else if CompareText(Pw, 'admin@example.com') = 0 then
+  else if CompareText(Pw, 'admin@vyaptek.com') = 0 then
     Problem := 'The password must not be the user name.';
   if Problem <> '' then
   begin
@@ -409,7 +420,7 @@ begin
   begin
     if NeedsAdminPassword and (AdminPage.Values[0] <> '') then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
-        'Sign in as admin@example.com with the administrator password you chose.';
+        'Sign in as admin@vyaptek.com with the administrator password you chose.';
     if LicenseResult <> '' then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + LicenseResult;
     if AbdmResult <> '' then
@@ -462,10 +473,10 @@ var
 begin
   if LoadStringsFromFile(ExpandConstant('{tmp}\license-install-result.txt'), Lines) and
      (ResultValue(Lines, 'status') = 'OK') then
-    LicenseResult := 'No product key was entered, so HMS opens read-only. Sign in as admin@example.com and ' +
+    LicenseResult := 'No product key was entered, so HMS opens read-only. Sign in as ' + AdminSignIn + ' and ' +
       'enter the key in Utility > License.'
   else
-    LicenseResult := 'No product key was entered. Sign in as admin@example.com and enter it in Utility > License.';
+    LicenseResult := 'No product key was entered. Sign in as ' + AdminSignIn + ' and enter it in Utility > License.';
 end;
 
 function KeyWasSkipped: Boolean;
