@@ -35,6 +35,7 @@ OutputBaseFilename=HMSSetup
 PrivilegesRequired=admin
 MinVersion=10.0
 CloseApplications=yes
+UninstallDisplayIcon={app}\hms.ico
 ; %TEMP%\Setup Log <date> #<n>.txt: records each [Run] step's exit code, so a hidden script that failed
 ; (write-secrets.ps1, for one) can be traced afterwards. Secrets go to scripts through files, never on a
 ; command line; the one exception is pg.exe's fixed "admin", which write-secrets.ps1 replaces at once.
@@ -50,6 +51,8 @@ var
   ResultCode: Integer;
   PGInstalled: Boolean;
   LibreOfficeChecked, LibreOfficeNeeded: Boolean;
+  AppBrowserChecked: Boolean;
+  AppBrowserPath: String;
   DBPage: TInputOptionWizardPage;
   AdminPage: TInputQueryWizardPage;
   LicensePage: TInputQueryWizardPage;
@@ -556,6 +559,47 @@ begin
   Result := LibreOfficeNeeded;
 end;
 
+// The path a browser registered under App Paths, or '' when it is not installed for all users.
+function RegisteredExe(const Exe: String): String;
+var
+  Path: String;
+begin
+  Result := '';
+  if not RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\' + Exe, '', Path) then
+    if not RegQueryStringValue(HKLM32, 'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\' + Exe, '', Path) then
+      Exit;
+  Path := RemoveQuotes(Path);
+  if FileExists(Path) then
+    Result := Path;
+end;
+
+// The browser the HMS shortcuts open as an app window (--app: no tabs or address bar): Chrome when
+// installed, else Edge, which every Windows 10/11 has. '' when neither is found; the shortcuts are
+// then plain links that open in the default browser.
+function AppBrowser: String;
+begin
+  if not AppBrowserChecked then
+  begin
+    AppBrowserPath := RegisteredExe('chrome.exe');
+    if AppBrowserPath = '' then
+      AppBrowserPath := RegisteredExe('msedge.exe');
+    if (AppBrowserPath = '') and FileExists(ExpandConstant('{commonpf32}\Microsoft\Edge\Application\msedge.exe')) then
+      AppBrowserPath := ExpandConstant('{commonpf32}\Microsoft\Edge\Application\msedge.exe');
+    AppBrowserChecked := True;
+  end;
+  Result := AppBrowserPath;
+end;
+
+function GetAppBrowser(Param: String): String;
+begin
+  Result := AppBrowser;
+end;
+
+function HasAppBrowser: Boolean;
+begin
+  Result := AppBrowser <> '';
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Exec('sc.exe', 'stop VyaptekHMS',    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -623,6 +667,17 @@ Source: "redis\redis-server.exe";           DestDir: "{app}\redis"
 Source: "redis\EventLog.dll";               DestDir: "{app}\redis"
 Source: "redis\redis.windows-service.conf"; DestDir: "{app}\redis"
 Source: "redis\redis-install.bat";          DestDir: "{app}\redis"
+
+; 7. The HMS icon (made from hms_webapp public/logo.svg) for the shortcuts below and Apps & features.
+Source: "hms.ico"; DestDir: "{app}"
+
+[Icons]
+; Desktop and Start menu shortcuts for everyone on this computer, opening HMS in its own window rather
+; than a browser tab. Recreated on every install and upgrade; removed on uninstall.
+Name: "{commondesktop}\Vyaptek HMS";  Filename: "{code:GetAppBrowser}"; Parameters: "--app=http://localhost/"; IconFilename: "{app}\hms.ico"; Comment: "Open Vyaptek HMS"; Check: HasAppBrowser
+Name: "{commonprograms}\Vyaptek HMS"; Filename: "{code:GetAppBrowser}"; Parameters: "--app=http://localhost/"; IconFilename: "{app}\hms.ico"; Comment: "Open Vyaptek HMS"; Check: HasAppBrowser
+Name: "{commondesktop}\Vyaptek HMS";  Filename: "http://localhost/"; IconFilename: "{app}\hms.ico"; Check: not HasAppBrowser
+Name: "{commonprograms}\Vyaptek HMS"; Filename: "http://localhost/"; IconFilename: "{app}\hms.ico"; Check: not HasAppBrowser
 
 [Run]
 ; 1. PostgreSQL 18 — skipped if already installed and user chose to keep it
