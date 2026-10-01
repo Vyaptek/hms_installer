@@ -267,8 +267,8 @@ begin
     Result := False;
     Exit;
   end;
-  Result := MsgBox('Could not confirm with Vyaptek that this version is covered by the license (' + Msg + ').' +
-    #13#10#13#10 + 'If the update period (AMC) has ended, HMS turns read-only after this upgrade. Continue anyway?',
+  Result := MsgBox('Could not confirm with Vyaptek that this version is covered by the license (' + Msg + ').' + #13#10#13#10 +
+    'If the update period (AMC) has ended, HMS turns read-only after this upgrade. Continue anyway?',
     mbConfirmation, MB_YESNO) = IDYES;
 end;
 
