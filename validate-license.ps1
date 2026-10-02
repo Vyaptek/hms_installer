@@ -5,8 +5,10 @@
 
   -Mode Check     Asks Vyaptek's license server whether the product key in -KeyFile is valid and
                   whether this build (-ReleaseDate, yyyy-MM-dd) may be installed under it. No side
-                  effects on either side. Result lines: status, customer, licenseId, abdm, seats,
-                  message. status is OK, INVALID, NOT_ENTITLED, OFFLINE or ERROR.
+                  effects on either side. Result lines: status, customer, licenseId, abdm, abdmBox,
+                  seats, message. status is OK, INVALID, NOT_ENTITLED, OFFLINE or ERROR. abdmBox is the
+                  ABDM relay box the key sets up (empty without ABDM, or from a license server before
+                  2026-10-03); the installer sets ABDM up again when this computer runs as another box.
   -Mode Upgrade   The upgrade guard, run before any file is replaced: may this build run on the
                   installation named in -InstallIdFile (config\license-activated, which the backend
                   writes when it activates a key)? status is OK, NOT_ENTITLED, OFFLINE or ERROR.
@@ -92,6 +94,7 @@ switch ($Mode) {
       customer  = $d.customerName
       licenseId = $d.licenseId
       abdm      = $(if ($d.abdmIncluded) { 'true' } else { 'false' })
+      abdmBox   = $(if ($d.abdmBoxId) { $d.abdmBoxId } else { '' })
       seats     = $d.maxWorkstations
     }
     if (-not $d.entitledToBuild) {

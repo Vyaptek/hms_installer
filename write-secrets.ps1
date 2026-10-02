@@ -9,6 +9,9 @@
     asks for one when the database is new). The backend applies it once, to USR0001, while that account
     still has the seeded password. Any copy left by an earlier run is dropped, because by then it is
     only a plaintext copy.
+  - hms.bootstrap.admin-username: the email the hospital chose to sign in with (-AdminEmailFile, asked
+    with the password since 2026-10-03). Applied with the password and under the same rule; an earlier
+    run's copy is dropped the same way.
   - spring.datasource.password (and the reporting pool's): with -PgBin, the PostgreSQL superuser's
     password is changed from the installer's old fixed one to a random one, once. With -NewDatabase
     (this run created the database) it is changed again. If the change fails the file keeps what it
@@ -24,6 +27,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$ConfigDir,
   [string]$AdminPasswordFile,
+  [string]$AdminEmailFile,
   [string]$PgBin,
   [switch]$NewDatabase,
   [string]$RedisConf
@@ -67,7 +71,7 @@ if (Get-ChildItem -Force -File $ConfigDir) {
 
 $lines = @()
 if (Test-Path $file) {
-  $lines = @(Get-Content $file | Where-Object { $_ -notmatch '^hms\.bootstrap\.admin-password=' })
+  $lines = @(Get-Content $file | Where-Object { $_ -notmatch '^hms\.bootstrap\.admin-(password|username)=' })
 }
 if (-not (Get-Prop $lines 'security.jwt.secret')) {
   $bytes = New-Object byte[] 48
@@ -83,6 +87,13 @@ if ($AdminPasswordFile -and (Test-Path $AdminPasswordFile)) {
   # The wizard allows printable ASCII without spaces only, so '\' is the one character a
   # .properties value needs escaped.
   if ($pw) { $lines += 'hms.bootstrap.admin-password=' + $pw.Replace('\', '\\') }
+}
+if ($AdminEmailFile -and (Test-Path $AdminEmailFile)) {
+  $raw = Get-Content -Raw $AdminEmailFile
+  $email = if ($raw) { $raw.Trim() } else { '' }
+  Remove-Item -Force $AdminEmailFile
+  # The wizard allows printable ASCII without spaces only, like the password.
+  if ($email) { $lines += 'hms.bootstrap.admin-username=' + $email.Replace('\', '\\') }
 }
 
 # I3: the PostgreSQL superuser had the password "admin" on every box.

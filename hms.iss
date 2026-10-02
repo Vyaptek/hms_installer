@@ -59,8 +59,11 @@ var
   // From validate-license.ps1 on the license page: who the key belongs to, and whether it includes ABDM.
   LicenseCustomer: String;
   LicenseIncludesAbdm: Boolean;
-  // Whether this computer was connected to ABDM before this run (worked out at install time).
-  AbdmWasEnrolled: Boolean;
+  // The ABDM relay box the key sets up ('' without ABDM, or from an older license server).
+  LicenseAbdmBox: String;
+  // Whether this computer was connected to ABDM before this run, and as another box than the key's
+  // (a new key, or a reinstall that kept an older settings file): both worked out at install time.
+  AbdmWasEnrolled, AbdmBoxChanged: Boolean;
   AbdmResult, LicenseResult: String;
   // True when the key was skipped on a computer without one: HMS then opens read-only until an
   // administrator enters it (backend optimization/26 §12; the super admin can always sign in to do so).
@@ -83,14 +86,16 @@ begin
   DBPage.Add('Fresh install — reinstall PostgreSQL and delete ALL hospital data (cannot be undone)');
   DBPage.SelectedValueIndex := 0;
 
-  // A new database seeds admin@hms.com (backend V154; admin@example.com before 2026-10-01) with a
-  // password that is public (it is in the backend's migrations). The password chosen here replaces it at
-  // the backend's first start.
+  // A new database seeds one administrator (admin@hms.com since backend V154) with a password that is
+  // public (it is in the backend's migrations). The email and password chosen here replace both at the
+  // backend's first start (hms.bootstrap.admin-username and -password, 2026-10-03).
   AdminPage := CreateInputQueryPage(DBPage.ID,
-    'Administrator Password',
-    'Choose the password for the admin@hms.com account.',
-    'The hospital database is new, so its administrator account needs a password. ' +
-    'Use at least 10 characters: letters, digits and symbols, no spaces. It is not shown again.');
+    'Administrator Account',
+    'Choose how the hospital''s administrator signs in.',
+    'The hospital database is new, so its administrator account needs a sign-in email and a password. ' +
+    'Use the hospital''s own email address. The password needs at least 10 characters: letters, digits ' +
+    'and symbols, no spaces. It is not shown again.');
+  AdminPage.Add('Administrator email (used to sign in):', False);
   AdminPage.Add('Administrator password:', True);
   AdminPage.Add('Confirm password:', True);
 
@@ -109,21 +114,40 @@ begin
   Result := AddBackslash(WizardDirValue) + 'backend\config\application.properties';
 end;
 
-// True once this computer holds a relay token (a previous install, or enroll-abdm.ps1 in this run).
-function IsAbdmEnrolled: Boolean;
+// The value of Key= in this computer's settings file, or ''.
+function ConfigValue(const Key: String): String;
 var
   Lines: TArrayOfString;
   I: Integer;
 begin
-  Result := False;
+  Result := '';
   if not LoadStringsFromFile(ConfigFile, Lines) then
     Exit;
   for I := 0 to GetArrayLength(Lines) - 1 do
-    if Pos('abdm.relay.pull.token=', Lines[I]) = 1 then
+    if Pos(Key + '=', Lines[I]) = 1 then
     begin
-      Result := True;
+      Result := Trim(Copy(Lines[I], Length(Key) + 2, Length(Lines[I])));
       Exit;
     end;
+end;
+
+// True once this computer holds a relay token (a previous install, or enroll-abdm.ps1 in this run).
+function IsAbdmEnrolled: Boolean;
+begin
+  Result := ConfigValue('abdm.relay.pull.token') <> '';
+end;
+
+// The ABDM relay box this computer runs as, or '' when it is not connected.
+function EnrolledAbdmBox: String;
+begin
+  Result := ConfigValue('abdm.relay.pull.box-id');
+end;
+
+// Connected as another box than the key's: the key was changed, or a reinstall kept an older settings
+// file. Setting ABDM up again then gives this computer the key's box (backend doc 26 §13).
+function IsOtherAbdmBox: Boolean;
+begin
+  Result := IsAbdmEnrolled and (LicenseAbdmBox <> '') and (EnrolledAbdmBox <> LicenseAbdmBox);
 end;
 
 function LicenseKey: String;
@@ -134,6 +158,13 @@ end;
 function HasLicenseKey: Boolean;
 begin
   Result := LicenseKey <> '';
+end;
+
+// A computer already connected as the key's own box is left alone: setting ABDM up again would only
+// issue a new token. The License page offers Reconnect ABDM if that token has stopped working.
+function ShouldEnrollAbdm: Boolean;
+begin
+  Result := HasLicenseKey and LicenseIncludesAbdm and (not AbdmWasEnrolled or AbdmBoxChanged);
 end;
 
 // The backend writes this (the installation's id) once it has activated a key. The upgrade guard asks
@@ -237,11 +268,15 @@ begin
   end;
   LicenseCustomer := ResultValue(Lines, 'customer');
   LicenseIncludesAbdm := ResultValue(Lines, 'abdm') = 'true';
+  LicenseAbdmBox := ResultValue(Lines, 'abdmBox');
   Seats := ResultValue(Lines, 'seats');
   Msg := 'This product key belongs to ' + LicenseCustomer + ' (' + ResultValue(Lines, 'licenseId') + ').';
   if Seats <> '' then
     Msg := Msg + #13#10 + Seats + ' workstations can use HMS at the same time.';
-  if LicenseIncludesAbdm then
+  if LicenseIncludesAbdm and IsOtherAbdmBox then
+    Msg := Msg + #13#10 + 'ABDM is included. This computer is connected to ABDM as ' + EnrolledAbdmBox +
+      ', not as this key''s ' + LicenseAbdmBox + ', so the key sets ABDM up again for ' + LicenseAbdmBox + '.'
+  else if LicenseIncludesAbdm then
     Msg := Msg + #13#10 + 'ABDM is included; this key also connects this computer to ABDM.';
   Result := MsgBox(Msg + #13#10#13#10 + 'Continue?', mbConfirmation, MB_YESNO) = IDYES;
 end;
@@ -297,12 +332,17 @@ begin
   Result := ShouldInitDB or ShouldCleanDB;
 end;
 
-// Who to sign in as. A new database's admin is admin@hms.com (backend V154); on a kept database it
-// may still be admin@example.com, so an upgrade names no account.
+function AdminEmail: String;
+begin
+  Result := Trim(AdminPage.Values[0]);
+end;
+
+// Who to sign in as: on a new database, the email chosen on the administrator page; on a kept database
+// the existing accounts are unchanged, so an upgrade names no account.
 function AdminSignIn: String;
 begin
-  if NeedsAdminPassword then
-    Result := 'admin@hms.com'
+  if NeedsAdminPassword and (AdminEmail <> '') then
+    Result := AdminEmail
   else
     Result := 'an administrator';
 end;
@@ -335,6 +375,26 @@ begin
     end;
 end;
 
+// One @ with something before it, a dot in the part after it, printable ASCII without spaces, and at
+// most 100 characters (users.username). The backend checks the same and keeps admin@hms.com if not.
+function LooksLikeEmail(const S: String): Boolean;
+var
+  At, I: Integer;
+  Domain: String;
+begin
+  Result := False;
+  if (Length(S) < 5) or (Length(S) > 100) or not IsPrintableAsciiWithoutSpace(S) then
+    Exit;
+  At := Pos('@', S);
+  if At < 2 then
+    Exit;
+  Domain := Copy(S, At + 1, Length(S));
+  if Pos('@', Domain) > 0 then
+    Exit;
+  I := Pos('.', Domain);
+  Result := (I > 1) and (I < Length(Domain));
+end;
+
 // Mirrors the backend's rules (PasswordPolicy) as far as the installer can check them. The backend
 // also refuses the seeded password itself; it then logs "was not applied" and asks for a change at
 // the first sign-in.
@@ -363,9 +423,11 @@ begin
   end;
   if CurPageID <> AdminPage.ID then
     Exit;
-  Pw := AdminPage.Values[0];
+  Pw := AdminPage.Values[1];
   Problem := '';
-  if Pw <> AdminPage.Values[1] then
+  if not LooksLikeEmail(AdminEmail) then
+    Problem := 'Enter the email address the administrator will sign in with, for example it@cityhospital.in.'
+  else if Pw <> AdminPage.Values[2] then
     Problem := 'The two passwords do not match.'
   else if Length(Pw) < 10 then
     Problem := 'The password must be at least 10 characters.'
@@ -373,8 +435,8 @@ begin
     Problem := 'The password must be at most 72 characters.'
   else if not IsPrintableAsciiWithoutSpace(Pw) then
     Problem := 'Use English letters, digits and symbols only, without spaces.'
-  else if CompareText(Pw, 'admin@hms.com') = 0 then
-    Problem := 'The password must not be the user name.';
+  else if CompareText(Pw, AdminEmail) = 0 then
+    Problem := 'The password must not be the email address.';
   if Problem <> '' then
   begin
     MsgBox(Problem, mbError, MB_OK);
@@ -386,16 +448,21 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   // Handed to write-secrets.ps1 through a file in {tmp}, never on a command line: other users can
   // read process command lines. {tmp} is private to this run and deleted when it ends.
-  if (CurStep = ssInstall) and NeedsAdminPassword and (AdminPage.Values[0] <> '') then
-    SaveStringToFile(ExpandConstant('{tmp}\admin-password.txt'), AdminPage.Values[0], False);
+  if (CurStep = ssInstall) and NeedsAdminPassword and (AdminPage.Values[1] <> '') then
+  begin
+    SaveStringToFile(ExpandConstant('{tmp}\admin-password.txt'), AdminPage.Values[1], False);
+    SaveStringToFile(ExpandConstant('{tmp}\admin-email.txt'), AdminEmail, False);
+  end;
   // Same for the product key: once for the backend to activate, once for ABDM when the license has it
-  // and this computer is not connected yet (each script deletes its copy).
+  // and this computer is not connected yet, or is connected as another box than the key's (each script
+  // deletes its copy).
   if CurStep = ssInstall then
   begin
     AbdmWasEnrolled := IsAbdmEnrolled;
+    AbdmBoxChanged := IsOtherAbdmBox;
     if HasLicenseKey then
       SaveStringToFile(ExpandConstant('{tmp}\license-key.txt'), LicenseKey, False);
-    if HasLicenseKey and LicenseIncludesAbdm and not AbdmWasEnrolled then
+    if ShouldEnrollAbdm then
       SaveStringToFile(ExpandConstant('{tmp}\abdm-product-key.txt'), LicenseKey, False);
   end;
 end;
@@ -418,9 +485,9 @@ begin
   end;
   if CurPageID = wpFinished then
   begin
-    if NeedsAdminPassword and (AdminPage.Values[0] <> '') then
+    if NeedsAdminPassword and (AdminPage.Values[1] <> '') then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
-        'Sign in as admin@hms.com with the administrator password you chose.';
+        'Sign in as ' + AdminEmail + ' with the administrator password you chose.';
     if LicenseResult <> '' then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + LicenseResult;
     if AbdmResult <> '' then
@@ -482,11 +549,6 @@ end;
 function KeyWasSkipped: Boolean;
 begin
   Result := LicenseSkipped;
-end;
-
-function ShouldEnrollAbdm: Boolean;
-begin
-  Result := HasLicenseKey and LicenseIncludesAbdm and not AbdmWasEnrolled;
 end;
 
 // The password on the last "requirepass" line of the Redis config (the one Redis uses), or ''.
@@ -704,7 +766,7 @@ Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_da
 ;    never had one gets one, which logs everyone out once), the admin password on a new database, a
 ;    random PostgreSQL superuser password instead of "admin" (again when the database is new) and a
 ;    Redis password. Before Redis is (re)installed, so it starts with its password.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"" -NewDatabase"; Flags: runhidden waituntilterminated; StatusMsg: "Generating this computer's keys..."; Check: NeedsAdminPassword; AfterInstall: CheckSecretsWritten
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"" -AdminEmailFile ""{tmp}\admin-email.txt"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"" -NewDatabase"; Flags: runhidden waituntilterminated; StatusMsg: "Generating this computer's keys..."; Check: NeedsAdminPassword; AfterInstall: CheckSecretsWritten
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"""; Flags: runhidden waituntilterminated; StatusMsg: "Checking this computer's keys..."; Check: KeepsDatabase; AfterInstall: CheckSecretsWritten
 
 ; 3a. The product key, when one was entered: into the locked config folder from step 3, for the backend
@@ -712,7 +774,8 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Fil
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\validate-license.ps1"" -Mode Install -KeyFile ""{tmp}\license-key.txt"" -ConfigDir ""{app}\backend\config"" -ResultFile ""{tmp}\license-install-result.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Saving the product key..."; Check: HasLicenseKey; AfterInstall: CheckLicenseInstalled
 ; 3a'. No key entered on a computer without one: HMS opens read-only until an administrator enters it.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\validate-license.ps1"" -Mode RequireKey -ConfigDir ""{app}\backend\config"" -ResultFile ""{tmp}\license-install-result.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Recording that the product key is still to be entered..."; Check: KeyWasSkipped; AfterInstall: CheckKeyRequired
-; 3b. ABDM, when the license includes it and this computer is not connected yet: redeem the product key
+; 3b. ABDM, when the license includes it and this computer is not connected yet, or is connected as
+;     another box than the key's (a new key, or a reinstall that kept old settings): redeem the product key
 ;     with Vyaptek and write this box's ABDM settings into the secret file from step 3. Before the
 ;     backend starts, so it starts with them.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\enroll-abdm.ps1"" -ConfigDir ""{app}\backend\config"" -RelayUrl ""{#AbdmRelayUrl}"" -ProductKeyFile ""{tmp}\abdm-product-key.txt"" -ResultFile ""{tmp}\abdm-enroll-result.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Connecting to ABDM..."; Check: ShouldEnrollAbdm; AfterInstall: CheckAbdmEnrolled
