@@ -52,9 +52,18 @@ function Set-Prop([string[]]$lines, [string]$key, [string]$value) {
 
 New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 # Lock the folder before any secret is written into it. SIDs, not names: "Administrators" is localised
-# on non-English Windows. /T also re-locks a file an earlier run left.
-icacls $ConfigDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T | Out-Null
+# on non-English Windows. The folder only, not /T: on a file that already existed, /inheritance:r
+# stripped its inherited entries and the (OI)(CI) grants gave it none back, so an upgrade left
+# application.properties readable by no one and the service failed with "Access is denied"
+# (2026-10-02). Files an earlier run left are reset to inherit the folder's entries instead; taking
+# ownership first lets that repair a file already emptied that way.
+icacls $ConfigDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "icacls failed on $ConfigDir" }
+if (Get-ChildItem -Force -File $ConfigDir) {
+  takeown /f (Join-Path $ConfigDir '*') /a | Out-Null
+  icacls (Join-Path $ConfigDir '*') /reset | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "icacls failed on the files in $ConfigDir" }
+}
 
 $lines = @()
 if (Test-Path $file) {
