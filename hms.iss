@@ -937,6 +937,9 @@ Source: "hms-db-support.ps1"; DestDir: "{app}"
 Source: "Run-HMS-Fix.bat";    DestDir: "{app}"
 Source: "run-hms-fix.ps1";    DestDir: "{app}"
 Source: "fix-signing-key.xml"; DestDir: "{app}"
+;    Host evidence for an audit (OP12): BitLocker, antivirus, firewall, updates, services, ports.
+Source: "Check-HMS-Host.bat"; DestDir: "{app}"
+Source: "check-host.ps1";     DestDir: "{app}"
 
 ; 3. Backend (Spring Boot JAR + WinSW)
 ;    Never ship backend\config: it holds each box's own secrets, and copying one over an install
