@@ -212,6 +212,54 @@ jobs:
           New-Item -ItemType Directory -Force "$stage\frontend" | Out-Null
           Copy-Item "$frontendDir\dist\*" "$stage\frontend\" -Recurse
 
+      # ── Software bill of materials (backend plan 24 §11, OP10) ────────────
+      # CycloneDX 1.6, one file per part, attached to the release: the backend jar's (the Gradle plugin,
+      # runtime classpath; Spring Boot also packs it into the jar), the frontend's npm packages without
+      # dev dependencies, and the third-party programs bundled here, with each one's version and SHA-256.
+      - name: Software bill of materials
+        run: |
+          New-Item -ItemType Directory -Force output | Out-Null
+          Copy-Item backend-src\build\reports\cyclonedx\application.cdx.json output\sbom-backend.cdx.json
+
+          $frontendDir = (Get-ChildItem -Path "frontend-src" -Filter "package.json" `
+                           -Recurse | Where-Object { $_.DirectoryName -notlike "*node_modules*" } `
+                           | Select-Object -First 1).DirectoryName
+          npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --omit dev --spec-version 1.6 `
+            --package-lock-only --output-format JSON --output-file "$PWD\output\sbom-frontend.cdx.json" `
+            "$frontendDir\package.json"
+          if ($LASTEXITCODE -ne 0) { throw "cyclonedx-npm failed with exit code $LASTEXITCODE" }
+
+          function Sha256([string]$path) { (Get-FileHash $path -Algorithm SHA256).Hash.ToLower() }
+          function Component([string]$name, [string]$version, [string]$supplier, [string]$license, [string]$url, [string]$sha) {
+            $c = [ordered]@{ type = 'application'; name = $name; version = $version; supplier = @{ name = $supplier } }
+            if ($license) { $c.licenses = @(@{ license = @{ id = $license } }) }
+            if ($url) { $c.externalReferences = @(@{ type = 'distribution'; url = $url }) }
+            if ($sha) { $c.hashes = @(@{ alg = 'SHA-256'; content = $sha }) }
+            return $c
+          }
+          $stage = "installer-repo"
+          $nginxVersion = ((& "$stage\nginx\nginx.exe" -v 2>&1) -join ' ') -replace '.*nginx/', ''
+          $components = @(
+            (Component 'Eclipse Temurin JRE' $env:JRE_VERSION 'Eclipse Foundation' 'GPL-2.0-with-classpath-exception' $env:JRE_URL $env:JRE_SHA256),
+            (Component 'LibreOffice' $env:LO_VERSION 'The Document Foundation' 'MPL-2.0' $env:LO_URL $env:LO_SHA256),
+            (Component 'Microsoft Garnet' $env:GARNET_VERSION 'Microsoft' 'MIT' $env:GARNET_URL $env:GARNET_SHA256),
+            (Component '.NET Runtime' $env:DOTNET_VERSION 'Microsoft' 'MIT' $env:DOTNET_URL $env:DOTNET_SHA256),
+            (Component 'PostgreSQL (EDB installer)' (Get-Item deps\pg.exe).VersionInfo.ProductVersion 'EnterpriseDB' 'PostgreSQL' '' (Sha256 deps\pg.exe)),
+            (Component 'nginx' $nginxVersion 'F5' 'BSD-2-Clause' '' (Sha256 "$stage\nginx\nginx.exe")),
+            (Component 'WinSW' (Get-Item "$stage\nginx-service.exe").VersionInfo.ProductVersion 'WinSW' 'MIT' '' (Sha256 "$stage\nginx-service.exe"))
+          )
+          $bom = [ordered]@{
+            bomFormat = 'CycloneDX'; specVersion = '1.6'; version = 1
+            serialNumber = 'urn:uuid:' + [guid]::NewGuid()
+            metadata = [ordered]@{
+              timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+              component = [ordered]@{ type = 'application'; name = 'Vyaptek HMS installer'; version = "${{ steps.ver.outputs.VERSION }}".TrimStart('v') }
+            }
+            components = $components
+          }
+          $bom | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 output\sbom-bundled.cdx.json
+          Get-ChildItem output\sbom-*.cdx.json | ForEach-Object { Write-Host "$($_.Name): $((Get-Content -Raw $_ | ConvertFrom-Json).components.Count) components" }
+
       # ── Compile installer ─────────────────────────────────────────────────
 
       - name: Install Inno Setup
@@ -256,4 +304,7 @@ jobs:
             - hms_installer `${{ steps.shas.outputs.INSTALLER_SHA }}`
             - HMSSetup.exe SHA-256 `${{ steps.hash.outputs.SHA256 }}`
             - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, PostgreSQL 18 (binaries-stable)
-          files: output\HMSSetup.exe
+            - Software bill of materials (CycloneDX 1.6): sbom-backend, sbom-frontend, sbom-bundled
+          files: |
+            output\HMSSetup.exe
+            output\sbom-*.cdx.json
