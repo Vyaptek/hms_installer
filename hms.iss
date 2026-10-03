@@ -72,6 +72,8 @@ var
   SecretsFailed, DatabaseFailed: Boolean;
   // Shown on the last page: the service accounts (OP2) and whether the backend came up after start.
   AccountsResult, BackendResult: String;
+  // Shown on the last page: HTTPS on the hospital network, and where each PC trusts it (OP5).
+  LanTlsResult: String;
   AppBrowserChecked: Boolean;
   AppBrowserPath: String;
   DBPage: TInputOptionWizardPage;
@@ -616,6 +618,8 @@ begin
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + AccountsResult;
     if BackendResult <> '' then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + BackendResult;
+    if LanTlsResult <> '' then
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + LanTlsResult;
     if SecretsFailed or DatabaseFailed then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
         'HMS was NOT started: the database could not be secured or updated. Run this installer again.';
@@ -833,6 +837,19 @@ begin
         'up. HMS works; run this installer again, or send ' + ServiceAccountsLog + ' to Vyaptek.';
       Exit;
     end;
+end;
+
+// lan-tls.ps1 leaves status=https|http and a message for the last page. Without HTTPS HMS still works
+// over plain HTTP, as before OP5, and the scheduled task tries again every hour, so no message box.
+procedure CheckLanTls;
+var
+  Lines: TArrayOfString;
+begin
+  if LoadStringsFromFile(ExpandConstant('{tmp}\lan-tls-result.txt'), Lines) then
+    LanTlsResult := ResultValue(Lines, 'message');
+  if LanTlsResult = '' then
+    LanTlsResult := 'HTTPS on the hospital network could not be set up; HMS works over plain HTTP. Send ' +
+      ExpandConstant('{app}\backend\logs\lan-tls.log') + ' to Vyaptek.';
 end;
 
 // wait-for-backend.ps1's one line: UP, STOPPED or STARTING. Nothing is rolled back in any case: an
@@ -1134,6 +1151,12 @@ Source: "nginx\conf\server-names.conf"; DestDir: "{app}\nginx\conf"; AfterInstal
 ;    The hospital's own host names for this box; theirs to edit, so never replaced.
 Source: "nginx\conf\server-names-extra.conf"; DestDir: "{app}\nginx\conf"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "nginx\html\*";    DestDir: "{app}\nginx\html"; Flags: recursesubdirs createallsubdirs
+;    HTTPS on the hospital network (backend plan 24 section 11, OP5): the trust page (http://<box>/trust),
+;    and the script that keeps this computer's certificate (at install, start, hourly, on a network
+;    change). lan-site.conf (in conf above) arrives as plain HTTP; lan-tls.ps1 switches it to HTTPS once
+;    nginx accepts that.
+Source: "nginx\trust\*";   DestDir: "{app}\nginx\trust"; Flags: recursesubdirs createallsubdirs
+Source: "lan-tls.ps1";     DestDir: "{app}"
 Source: "nginx-service.exe"; DestDir: "{app}"
 Source: "nginx-service.xml"; DestDir: "{app}"
 
@@ -1221,6 +1244,10 @@ Filename: "{app}\free-port-80.bat"; Flags: runhidden; StatusMsg: "Freeing web po
 Filename: "{app}\nginx-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Web Server..."
 ;    Their own Windows accounts and folders; the uploads move from C:\data\uploads once (OP3).
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\service-accounts.ps1"" -AppDir ""{app}"" -LogFile ""{app}\backend\logs\service-accounts.log"""; Flags: runhidden waituntilterminated; StatusMsg: "Setting up the HMS service accounts..."; AfterInstall: CheckServiceAccounts
+;    HTTPS (OP5): this computer's certificate, trusted on this computer, nginx switched to HTTPS, and the
+;    task that keeps it current. After nginx's account exists (it is given the certificate) and before
+;    nginx starts.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\lan-tls.ps1"" -AppDir ""{app}"" -Install -ResultFile ""{tmp}\lan-tls-result.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Setting up HTTPS for the hospital network..."; AfterInstall: CheckLanTls
 
 ; 8. Start the backend and nginx (the React frontend), then wait up to 10 minutes for the backend to
 ;    answer (OP2).
@@ -1231,12 +1258,12 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Fil
 ; 8a. The nightly encrypted backup (OP11), registered again on every run.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\backup-database.ps1"" -Schedule"; Flags: runhidden waituntilterminated; StatusMsg: "Scheduling the nightly backup..."
 
-; 9. Firewall: port 80 from the hospital's own network only (OP6): this computer's subnets and the
+; 9. Firewall: ports 80 and 443 (HTTPS, OP5) from the hospital's own network only (OP6): this computer's subnets and the
 ;    private address ranges (routed VLANs between wards use them), never the internet. Every network
 ;    profile, because Windows marks a network nobody classified as Public. Deleted first: "add rule"
 ;    added another copy on every run. Garnet 6379 and the backend 8080 listen on 127.0.0.1 only, and
 ;    PostgreSQL does too (OP7).
-Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name=""Vyaptek HMS Web"" >nul 2>&1 & netsh advfirewall firewall add rule name=""Vyaptek HMS Web"" dir=in action=allow protocol=TCP localport=80 profile=any remoteip=LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"""; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
+Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name=""Vyaptek HMS Web"" >nul 2>&1 & netsh advfirewall firewall add rule name=""Vyaptek HMS Web"" dir=in action=allow protocol=TCP localport=80,443 profile=any remoteip=LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"""; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
 
 [UninstallRun]
 ; Stop and remove in reverse startup order
@@ -1253,6 +1280,11 @@ Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name
 ;    The nightly backup. The backups themselves (%ProgramData%\Vyaptek\HMS\backups) are the hospital's
 ;    data and stay.
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""\Vyaptek\Vyaptek HMS Backup"" /F"; Flags: runhidden; RunOnceId: "RemoveBackupTask"
+;    HTTPS (OP5): the certificate task, and this computer's own trust in the CA. The CA itself
+;    (%ProgramData%\Vyaptek\HMS\lan-ca) stays, like the box's other secrets, so a reinstall keeps every
+;    PC's trust.
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""\Vyaptek\Vyaptek HMS HTTPS Certificate"" /F"; Flags: runhidden; RunOnceId: "RemoveLanTlsTask"
+Filename: "powershell.exe"; Parameters: "-NoProfile -Command ""Get-ChildItem Cert:\LocalMachine\Root | Where-Object {{ $_.Subject -like '*O=Vyaptek HMS*' -and $_.Subject -like '*LAN CA*' } | Remove-Item"""; Flags: runhidden; RunOnceId: "RemoveLanCaTrust"
 
 ; backend\config (the box's secrets) is kept on uninstall on purpose: PostgreSQL is not uninstalled,
 ; and that file holds the only copy of its superuser password (backend plan 24, I3). The folder is
@@ -1263,5 +1295,8 @@ Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""\Vyaptek\Vyaptek HMS 
 ; only the cache password, which nothing needs once HMS is gone.
 Type: files; Name: "{app}\garnet\garnet.conf"
 Type: filesandordirs; Name: "{app}\garnet\logs"
+; The server certificate and the trust page's files, written by lan-tls.ps1 (OP5).
+Type: filesandordirs; Name: "{app}\nginx\conf\tls"
+Type: filesandordirs; Name: "{app}\nginx\trust"
 ; The backend's temp folder (OP2). Its uploads folder next to it is the hospital's data and stays.
 Type: filesandordirs; Name: "{commonappdata}\Vyaptek\HMS\temp"
