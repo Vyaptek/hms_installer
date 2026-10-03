@@ -26,6 +26,11 @@ on:
 # https://www.libreoffice.org/download/release-notes/, Garnet: https://github.com/microsoft/garnet/releases,
 # .NET: https://dotnet.microsoft.com/download/dotnet/10.0).
 env:
+  # PostgreSQL, the EDB Windows installer (hms.iss runs it silently). PG_VERSION is major.minor and is
+  # what hms.iss compares with an installed copy; the exe's own version fields carry no minor.
+  PG_VERSION: "18.6"
+  PG_URL: https://get.enterprisedb.com/postgresql/postgresql-18.6-1-windows-x64.exe
+  PG_SHA256: cae561e98d09f3f4a1a95759249240f86f66d71dcf33d14b6f7be894078401d1
   # Temurin JRE, the backend's runtime on the box. Must match the backend's Gradle toolchain (25).
   JRE_VERSION: 25.0.4.1+1
   JRE_URL: https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jre_x64_windows_hotspot_25.0.4.1_1.zip
@@ -154,22 +159,16 @@ jobs:
         # Version and release date go into the jar's build-info, which the license check reads.
         run: ./gradlew bootJar --no-daemon "-PappVersion=$("${{ steps.ver.outputs.VERSION }}".TrimStart('v'))" "-PreleaseDate=${{ steps.ver.outputs.RELEASE_DATE }}"
 
-      # ── Download large binaries from binaries-stable release ─────────────
+      # ── Download the pinned binaries ─────────────────────────────────────
 
-      - name: Download bundled binaries
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release download binaries-stable --dir deps `
-            --repo ${{ github.repository }} --pattern pg.exe
-
-      - name: Download Java runtime, LibreOffice, Garnet and the .NET runtime
+      - name: Download PostgreSQL, Java runtime, LibreOffice, Garnet and the .NET runtime
         run: |
           function Get-Pinned([string]$url, [string]$sha256, [string]$out) {
             Invoke-WebRequest $url -OutFile $out
             $hash = (Get-FileHash $out -Algorithm SHA256).Hash
             if ($hash -ne $sha256) { throw "Checksum mismatch for $url`: got $hash" }
           }
+          Get-Pinned $env:PG_URL $env:PG_SHA256 deps\pg.exe
           Get-Pinned $env:JRE_URL $env:JRE_SHA256 deps\jre.zip
           Get-Pinned $env:LO_URL $env:LO_SHA256 deps\libreoffice.msi
           Get-Pinned $env:GARNET_URL $env:GARNET_SHA256 deps\garnet.zip
@@ -256,7 +255,7 @@ jobs:
             (Component 'Microsoft Garnet' $env:GARNET_VERSION 'Microsoft' 'MIT' $env:GARNET_URL $env:GARNET_SHA256),
             (Component '.NET Runtime' $env:DOTNET_VERSION 'Microsoft' 'MIT' $env:DOTNET_URL $env:DOTNET_SHA256),
             (Component 'age' $env:AGE_VERSION 'Filippo Valsorda' 'BSD-3-Clause' $env:AGE_URL $env:AGE_SHA256),
-            (Component 'PostgreSQL (EDB installer)' (Get-Item deps\pg.exe).VersionInfo.ProductVersion 'EnterpriseDB' 'PostgreSQL' '' (Sha256 deps\pg.exe)),
+            (Component 'PostgreSQL (EDB installer)' $env:PG_VERSION 'EnterpriseDB' 'PostgreSQL' $env:PG_URL $env:PG_SHA256),
             (Component 'nginx' $nginxVersion 'F5' 'BSD-2-Clause' '' (Sha256 "$stage\nginx\nginx.exe")),
             (Component 'WinSW' (Get-Item "$stage\nginx-service.exe").VersionInfo.ProductVersion 'WinSW' 'MIT' '' (Sha256 "$stage\nginx-service.exe"))
           )
@@ -287,15 +286,9 @@ jobs:
           $appVersion = "${{ steps.ver.outputs.VERSION }}".TrimStart('v')
 
           # The bundled PostgreSQL release (major.minor): an upgrade brings an older 18.x on a box up to it.
-          # The EDB installer's ProductVersion can be the bare major ("18"); FileVersion then carries the minor.
-          $pgInfo = (Get-Item deps\pg.exe).VersionInfo
-          $pgProduct = $pgInfo.ProductVersion
-          if ($pgProduct -notmatch '^(18)\.(\d+)') { $pgProduct = $pgInfo.FileVersion }
-          if ($pgProduct -notmatch '^(18)\.(\d+)') {
-            throw "pg.exe is not PostgreSQL 18.x (ProductVersion '$($pgInfo.ProductVersion)', FileVersion '$($pgInfo.FileVersion)'): hms.iss and the service name assume 18"
-          }
-          $pgVersion = "$($Matches[1]).$($Matches[2])"
-          Write-Host "Bundled PostgreSQL $pgVersion ($pgProduct)"
+          if ($env:PG_VERSION -notmatch '^18\.\d+$') { throw "PG_VERSION '$env:PG_VERSION' is not 18.x: hms.iss and the service name assume 18" }
+          $pgVersion = $env:PG_VERSION
+          Write-Host "Bundled PostgreSQL $pgVersion"
 
           # No release without Vyaptek's backup key: every box would fail every backup, and every upgrade.
           if (-not (Select-String -Path "$(Split-Path $issFile)\backup-master-key.txt" -Pattern '^age1[0-9a-z]+$' -Quiet)) {
@@ -332,7 +325,7 @@ jobs:
             - hms_webapp `${{ steps.refs.outputs.FRONTEND }}` (`${{ steps.shas.outputs.FRONTEND_SHA }}`)
             - hms_installer `${{ steps.shas.outputs.INSTALLER_SHA }}`
             - HMSSetup.exe SHA-256 `${{ steps.hash.outputs.SHA256 }}`
-            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, age ${{ env.AGE_VERSION }}, PostgreSQL 18 (binaries-stable)
+            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, age ${{ env.AGE_VERSION }}, PostgreSQL ${{ env.PG_VERSION }}
             - Software bill of materials (CycloneDX 1.6): sbom-backend, sbom-frontend, sbom-bundled
           files: |
             output\HMSSetup.exe
