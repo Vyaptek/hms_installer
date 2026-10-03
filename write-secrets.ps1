@@ -16,9 +16,9 @@
     password is changed from the installer's old fixed one to a random one, once. With -NewDatabase
     (this run created the database) it is changed again. If the change fails the file keeps what it
     had, and the backend falls back to DB_PASSWORD in hms-service.xml.
-  - spring.data.redis.password: with -RedisConf, a random Redis password, created once, written into
-    the Redis config as requirepass. Restart Redis afterwards (the installer reinstalls the service
-    right after this script).
+  - spring.data.redis.password: with -GarnetConf, a random password for the cache server (Garnet), created
+    once, and Garnet's whole config written with it. Restart VyaptekGarnet afterwards (the installer
+    re-registers the service right after this script).
 
   Only SYSTEM (the service account) and Administrators can read the folder.
 
@@ -30,13 +30,13 @@ param(
   [string]$AdminEmailFile,
   [string]$PgBin,
   [switch]$NewDatabase,
-  [string]$RedisConf
+  [string]$GarnetConf
 )
 $ErrorActionPreference = 'Stop'
 $file = Join-Path $ConfigDir 'application.properties'
 
 # Letters and digits only, so the value needs no escaping in a .properties file, a batch file, SQL or
-# the Redis config.
+# Garnet's JSON config.
 function New-Secret([int]$bytes) {
   $buf = New-Object byte[] $bytes
   $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -128,20 +128,36 @@ if ($PgBin) {
   }
 }
 
-# I3: Redis had no password. It listens on 127.0.0.1 only; this keeps other local accounts out.
-if ($RedisConf) {
-  $redisPw = Get-Prop $lines 'spring.data.redis.password'
-  if (-not $redisPw) {
-    $redisPw = New-Secret 24
-    $lines = Set-Prop $lines 'spring.data.redis.password' $redisPw
+# I3: the cache server had no password. Garnet (which replaced the archived Windows Redis port) is
+# written a whole config every run: 127.0.0.1 only, this password, memory limits. The password keeps
+# its old name in application.properties, because the backend talks to Garnet as to Redis.
+if ($GarnetConf) {
+  $cachePw = Get-Prop $lines 'spring.data.redis.password'
+  if (-not $cachePw) {
+    $cachePw = New-Secret 24
+    $lines = Set-Prop $lines 'spring.data.redis.password' $cachePw
   }
-  # The installer copies a fresh Redis config on every run, so the line is added every run.
-  $conf = @(Get-Content $RedisConf | Where-Object { $_ -notmatch '^\s*requirepass\s' }) + "requirepass $redisPw"
-  Set-Content -Path $RedisConf -Encoding ASCII -Value $conf
-  # Readable by the accounts a Windows service runs as (SYSTEM, LocalService, NetworkService) and
-  # Administrators, not by other users.
-  icacls $RedisConf /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-19:R' '*S-1-5-20:R' | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "icacls failed on $RedisConf" }
+  # One setting per line: hms.iss reads the Password line back to check it matches.
+  # LogMemorySize caps memory (Garnet's default is 16g); nothing is written to disk, as with the old
+  # Redis ("save" off), so a restart signs everyone out. Expired keys are swept every 5 minutes
+  # (Garnet's default only drops them when read).
+  $conf = @(
+    '{',
+    '  "Address": "127.0.0.1",',
+    '  "Port": 6379,',
+    '  "AuthenticationMode": "Password",',
+    ('  "Password": "' + $cachePw + '",'),
+    '  "LogMemorySize": "512m",',
+    '  "IndexSize": "64m",',
+    '  "ExpiredKeyDeletionScanFrequencySecs": 300,',
+    '  "EnableLua": false',
+    '}'
+  )
+  Set-Content -Path $GarnetConf -Encoding ASCII -Value $conf
+  # Readable by SYSTEM, Administrators and Network Service (the account VyaptekGarnet runs as), not by
+  # other users.
+  icacls $GarnetConf /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-20:R' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "icacls failed on $GarnetConf" }
 }
 
 Set-Content -Path $file -Encoding ASCII -Value $lines

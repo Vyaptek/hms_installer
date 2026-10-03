@@ -1,0 +1,19 @@
+<service>
+  <id>VyaptekGarnet</id>
+  <name>Vyaptek HMS Cache (Garnet)</name>
+  <description>Sessions and caches for the HMS backend. Microsoft Garnet, which speaks the Redis protocol; it replaced the archived Windows Redis 5 port (backend plan 24, on-prem hardening).</description>
+  <!-- Needs the .NET 10 runtime, which the installer puts in when it is missing. -->
+  <executable>%BASE%\GarnetServer.exe</executable>
+  <!-- garnet.conf is written by write-secrets.ps1: 127.0.0.1 only, a password, memory limits. -->
+  <arguments>--config-import-path "%BASE%\garnet.conf"</arguments>
+  <workingdirectory>%BASE%</workingdirectory>
+  <startmode>Automatic</startmode>
+
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="20 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <log mode="roll"></log>
+  <logpath>%BASE%\logs</logpath>
+</service>
