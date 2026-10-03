@@ -1,1 +1,4 @@
+# Vyaptek's backup key (backup-database.ps1, backend plan 24 section 11, OP11): the public half only.
+# Made 2026-10-03 with backend scripts/new-backup-master-key.sh; the private key is kept offline by
+# Vyaptek and never comes here. CI refuses to build a release without the age1 line below.
 age1qjqgpz8aze3dpt8ce3q0aa2anl0ufaetx4zu6sqmqr950vjav9hs5kzq3q
