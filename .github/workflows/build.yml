@@ -168,6 +168,7 @@ jobs:
             $hash = (Get-FileHash $out -Algorithm SHA256).Hash
             if ($hash -ne $sha256) { throw "Checksum mismatch for $url`: got $hash" }
           }
+          New-Item -ItemType Directory -Force deps | Out-Null
           Get-Pinned $env:PG_URL $env:PG_SHA256 deps\pg.exe
           Get-Pinned $env:JRE_URL $env:JRE_SHA256 deps\jre.zip
           Get-Pinned $env:LO_URL $env:LO_SHA256 deps\libreoffice.msi
