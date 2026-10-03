@@ -287,8 +287,13 @@ jobs:
           $appVersion = "${{ steps.ver.outputs.VERSION }}".TrimStart('v')
 
           # The bundled PostgreSQL release (major.minor): an upgrade brings an older 18.x on a box up to it.
-          $pgProduct = (Get-Item deps\pg.exe).VersionInfo.ProductVersion
-          if ($pgProduct -notmatch '^(18)\.(\d+)') { throw "pg.exe is PostgreSQL '$pgProduct', not 18.x: hms.iss and the service name assume 18" }
+          # The EDB installer's ProductVersion can be the bare major ("18"); FileVersion then carries the minor.
+          $pgInfo = (Get-Item deps\pg.exe).VersionInfo
+          $pgProduct = $pgInfo.ProductVersion
+          if ($pgProduct -notmatch '^(18)\.(\d+)') { $pgProduct = $pgInfo.FileVersion }
+          if ($pgProduct -notmatch '^(18)\.(\d+)') {
+            throw "pg.exe is not PostgreSQL 18.x (ProductVersion '$($pgInfo.ProductVersion)', FileVersion '$($pgInfo.FileVersion)'): hms.iss and the service name assume 18"
+          }
           $pgVersion = "$($Matches[1]).$($Matches[2])"
           Write-Host "Bundled PostgreSQL $pgVersion ($pgProduct)"
 
