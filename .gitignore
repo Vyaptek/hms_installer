@@ -5,6 +5,7 @@ pg.exe
 java.msi
 libreoffice.msi
 dotnet-runtime.exe
+age/
 garnet/bin/
 frontend/
 backend/hms.jar

@@ -45,6 +45,11 @@ env:
   DOTNET_VERSION: 10.0.12
   DOTNET_URL: https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.12/dotnet-runtime-10.0.12-win-x64.exe
   DOTNET_SHA256: 02ea072c08f890f9dc0d3ac71b5fd4c2bfcdced4e1133e2d917ce5422b025585
+  # age, which encrypts the box's backups to Vyaptek's key (backend plan 24 §11, OP11): age.exe and
+  # age-keygen.exe from the Windows zip (https://github.com/FiloSottile/age/releases).
+  AGE_VERSION: 1.3.2
+  AGE_URL: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-windows-amd64.zip
+  AGE_SHA256: f48d8f8f9ebe903ab5027ed067652f2cc1db94bc206976430133b905dcd8e8c7
 
 jobs:
   build:
@@ -169,8 +174,10 @@ jobs:
           Get-Pinned $env:LO_URL $env:LO_SHA256 deps\libreoffice.msi
           Get-Pinned $env:GARNET_URL $env:GARNET_SHA256 deps\garnet.zip
           Get-Pinned $env:DOTNET_URL $env:DOTNET_SHA256 deps\dotnet-runtime.exe
+          Get-Pinned $env:AGE_URL $env:AGE_SHA256 deps\age.zip
           Expand-Archive deps\jre.zip -DestinationPath deps\jre-unzipped
           Expand-Archive deps\garnet.zip -DestinationPath deps\garnet-unzipped
+          Expand-Archive deps\age.zip -DestinationPath deps\age-unzipped
 
       # ── Assemble staging directory ────────────────────────────────────────
 
@@ -184,6 +191,10 @@ jobs:
           Copy-Item deps\pg.exe          $stage\
           Copy-Item deps\libreoffice.msi $stage\
           Copy-Item deps\dotnet-runtime.exe $stage\
+
+          # age: the two programs the backups use, not its plugins.
+          New-Item -ItemType Directory -Force "$stage\age" | Out-Null
+          Copy-Item deps\age-unzipped\age\age.exe, deps\age-unzipped\age\age-keygen.exe "$stage\age\"
 
           # Garnet: the net10.0 server only. Not net8.0, not Service\ (Garnet's own Windows service host;
           # WinSW runs GarnetServer.exe instead), and not the sample garnet.conf: write-secrets.ps1 writes
@@ -244,6 +255,7 @@ jobs:
             (Component 'LibreOffice' $env:LO_VERSION 'The Document Foundation' 'MPL-2.0' $env:LO_URL $env:LO_SHA256),
             (Component 'Microsoft Garnet' $env:GARNET_VERSION 'Microsoft' 'MIT' $env:GARNET_URL $env:GARNET_SHA256),
             (Component '.NET Runtime' $env:DOTNET_VERSION 'Microsoft' 'MIT' $env:DOTNET_URL $env:DOTNET_SHA256),
+            (Component 'age' $env:AGE_VERSION 'Filippo Valsorda' 'BSD-3-Clause' $env:AGE_URL $env:AGE_SHA256),
             (Component 'PostgreSQL (EDB installer)' (Get-Item deps\pg.exe).VersionInfo.ProductVersion 'EnterpriseDB' 'PostgreSQL' '' (Sha256 deps\pg.exe)),
             (Component 'nginx' $nginxVersion 'F5' 'BSD-2-Clause' '' (Sha256 "$stage\nginx\nginx.exe")),
             (Component 'WinSW' (Get-Item "$stage\nginx-service.exe").VersionInfo.ProductVersion 'WinSW' 'MIT' '' (Sha256 "$stage\nginx-service.exe"))
@@ -274,11 +286,23 @@ jobs:
           # AppVersion without the tag's leading "v": it is what Windows shows under Apps.
           $appVersion = "${{ steps.ver.outputs.VERSION }}".TrimStart('v')
 
+          # The bundled PostgreSQL release (major.minor): an upgrade brings an older 18.x on a box up to it.
+          $pgProduct = (Get-Item deps\pg.exe).VersionInfo.ProductVersion
+          if ($pgProduct -notmatch '^(18)\.(\d+)') { throw "pg.exe is PostgreSQL '$pgProduct', not 18.x: hms.iss and the service name assume 18" }
+          $pgVersion = "$($Matches[1]).$($Matches[2])"
+          Write-Host "Bundled PostgreSQL $pgVersion ($pgProduct)"
+
+          # No release without Vyaptek's backup key: every box would fail every backup, and every upgrade.
+          if (-not (Select-String -Path "$(Split-Path $issFile)\backup-master-key.txt" -Pattern '^age1[0-9a-z]+$' -Quiet)) {
+            throw "backup-master-key.txt has no age1... key (backend scripts/new-backup-master-key.sh)"
+          }
+
           # Run the compiler using the discovered path
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             /DAppVersion="$appVersion" `
             /DLibreOfficeVersion="$env:LO_VERSION" `
             /DDotNetVersion="$env:DOTNET_VERSION" `
+            /DPostgresVersion="$pgVersion" `
             /DAppReleaseDate="${{ steps.ver.outputs.RELEASE_DATE }}" `
             /O"output" `
             "$issFile"
@@ -303,7 +327,7 @@ jobs:
             - hms_webapp `${{ steps.refs.outputs.FRONTEND }}` (`${{ steps.shas.outputs.FRONTEND_SHA }}`)
             - hms_installer `${{ steps.shas.outputs.INSTALLER_SHA }}`
             - HMSSetup.exe SHA-256 `${{ steps.hash.outputs.SHA256 }}`
-            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, PostgreSQL 18 (binaries-stable)
+            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, age ${{ env.AGE_VERSION }}, PostgreSQL 18 (binaries-stable)
             - Software bill of materials (CycloneDX 1.6): sbom-backend, sbom-frontend, sbom-bundled
           files: |
             output\HMSSetup.exe

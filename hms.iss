@@ -26,6 +26,11 @@
 #ifndef AppReleaseDate
   #define AppReleaseDate ""
 #endif
+; The bundled pg.exe's PostgreSQL release (major.minor, e.g. 18.3), set by CI from its version info. An
+; upgrade brings an older 18.x on the box up to it. Blank on a local build, which never patches.
+#ifndef PostgresVersion
+  #define PostgresVersion ""
+#endif
 
 [Setup]
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -55,6 +60,11 @@ Name: "{app}\nginx\temp"
 var
   ResultCode: Integer;
   PGInstalled: Boolean;
+  // The box's PostgreSQL release (e.g. 18.1, from postgres.exe -V), worked out once; '' when unknown.
+  PGVersionChecked: Boolean;
+  PGVersion: String;
+  // Shown on the last page: the PostgreSQL update, and the backup before the upgrade (OP11).
+  PGPatchResult, BackupResult: String;
   LibreOfficeChecked, LibreOfficeNeeded: Boolean;
   DotNetChecked, DotNetNeeded: Boolean;
   // Set when the person gave up on Retry: the box's secrets, or the database update, are missing, so
@@ -88,13 +98,15 @@ begin
   PGInstalled := RegKeyExists(HKLM,
     'SYSTEM\CurrentControlSet\Services\postgresql-x64-18');
 
+  // Two choices, not a third "update PostgreSQL only": an upgrade brings everything bundled up to this
+  // release, PostgreSQL's minor release included, and its explanation (CurPageChanged) says when it does.
   DBPage := CreateInputOptionPage(wpSelectDir,
     'Existing Installation Detected',
-    'PostgreSQL and the hospital database are already installed.',
-    'How would you like to proceed?',
+    'HMS and the hospital database are already installed on this computer.',
+    '',
     True, False);
-  DBPage.Add('Keep existing data (recommended — upgrades without data loss)');
-  DBPage.Add('Fresh install — reinstall PostgreSQL and delete ALL hospital data (cannot be undone)');
+  DBPage.Add('Upgrade (recommended): keep all hospital data and bring HMS up to this version');
+  DBPage.Add('Fresh install: delete ALL hospital data and start with an empty HMS (cannot be undone)');
   DBPage.SelectedValueIndex := 0;
 
   // A new database seeds one administrator (admin@hms.com since backend V154) with a password that is
@@ -319,12 +331,84 @@ begin
     mbConfirmation, MB_YESNO) = IDYES;
 end;
 
+// The release postgres.exe -V names ("postgres (PostgreSQL) 18.1" -> "18.1"), or '' when it can't be read.
+function InstalledPostgresVersion: String;
+var
+  Output: TExecOutput;
+  Code, I: Integer;
+  S: String;
+begin
+  if not PGVersionChecked then
+  begin
+    PGVersion := '';
+    if ExecAndCaptureOutput(AddBackslash(WizardDirValue) + 'pgsql\bin\postgres.exe', '-V', '', SW_HIDE,
+         ewWaitUntilTerminated, Code, Output) and (Code = 0) and (GetArrayLength(Output.StdOut) > 0) then
+    begin
+      S := Trim(Output.StdOut[0]);
+      I := Pos(') ', S);
+      if I > 0 then
+      begin
+        S := Copy(S, I + 2, Length(S));
+        I := Pos(' ', S);
+        if I > 0 then
+          S := Copy(S, 1, I - 1);
+        PGVersion := S;
+      end;
+    end;
+    PGVersionChecked := True;
+  end;
+  Result := PGVersion;
+end;
+
+// An upgrade that keeps the data, on a box with an older minor release of the same PostgreSQL major
+// (18) as the bundled pg.exe. EDB's installer, run over an existing installation of the same major,
+// updates it in place: same folder, same data directory, its settings kept, the command line's options
+// ignored (EDB's docs). A minor release never changes the data's format, so nothing is migrated; this
+// release's own migrations run afterwards as on every upgrade (setup-database.bat).
+function ShouldPatchPG: Boolean;
+var
+  Installed, Bundled: String;
+  InstalledPacked, BundledPacked: Int64;
+begin
+  Result := False;
+  Bundled := '{#PostgresVersion}';
+  if not PGInstalled or (DBPage.SelectedValueIndex <> 0) or (Bundled = '') then
+    Exit;
+  Installed := InstalledPostgresVersion;
+  if (Pos('18.', Installed) <> 1) or (Pos('18.', Bundled) <> 1) then
+    Exit;
+  Result := StrToVersion(Installed, InstalledPacked) and StrToVersion(Bundled, BundledPacked) and
+    (ComparePackedVersion(InstalledPacked, BundledPacked) < 0);
+end;
+
+// A new computer, or Fresh install. Not an upgrade: that is ShouldPatchPG.
 function ShouldInstallPG: Boolean;
 begin
   if PGInstalled then
-    Result := DBPage.SelectedValueIndex = 1  // upgrade: reinstall only if user chose fresh install
+    Result := DBPage.SelectedValueIndex = 1
   else
-    Result := True;  // fresh machine — always install PG
+    Result := True;
+end;
+
+// [Files]: pg.exe comes along for either.
+function NeedsPgInstaller: Boolean;
+begin
+  Result := ShouldInstallPG or ShouldPatchPG;
+end;
+
+// After the update: did postgres.exe move to the bundled release? If not, the data is untouched and HMS
+// carries on with the old release; the next upgrade tries again.
+procedure CheckPostgresPatched;
+begin
+  PGVersionChecked := False;
+  if InstalledPostgresVersion = '{#PostgresVersion}' then
+    PGPatchResult := 'PostgreSQL was updated to {#PostgresVersion}.'
+  else
+  begin
+    PGPatchResult := 'PostgreSQL could not be updated to {#PostgresVersion} and is still ' + InstalledPostgresVersion +
+      '. The hospital data is unchanged and HMS works; run this installer again, or tell Vyaptek.';
+    SuppressibleMsgBox(PGPatchResult, mbError, MB_OK, IDOK);
+  end;
 end;
 
 function ShouldCleanDB: Boolean;
@@ -486,7 +570,21 @@ begin
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
+var
+  Pg: String;
 begin
+  if CurPageID = DBPage.ID then
+  begin
+    Pg := InstalledPostgresVersion;
+    DBPage.SubCaptionLabel.Caption :=
+      'Upgrade first backs up the hospital data (encrypted; only Vyaptek can read it), then installs this ' +
+      'version and updates the database to it. HMS is unavailable for a few minutes, so upgrade outside ' +
+      'busy hours.';
+    if ('{#PostgresVersion}' <> '') and (Pos('18.', Pg) = 1) and (Pg <> '{#PostgresVersion}') then
+      DBPage.SubCaptionLabel.Caption := DBPage.SubCaptionLabel.Caption + #13#10#13#10 +
+        'The database server, PostgreSQL ' + Pg + ', is also updated to {#PostgresVersion}: a security and ' +
+        'bug-fix release that keeps the data as it is.';
+  end;
   if CurPageID = LicensePage.ID then
   begin
     if IsLicenseActivated then
@@ -510,6 +608,10 @@ begin
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + LicenseResult;
     if AbdmResult <> '' then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + AbdmResult;
+    if BackupResult <> '' then
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + BackupResult;
+    if PGPatchResult <> '' then
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + PGPatchResult;
     if AccountsResult <> '' then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + AccountsResult;
     if BackendResult <> '' then
@@ -883,6 +985,51 @@ begin
   Result := AppBrowser <> '';
 end;
 
+// The message backup-database.ps1 left in last-backup.txt, or a general one.
+function BackupMessage: String;
+var
+  Lines: TArrayOfString;
+begin
+  Result := '';
+  if LoadStringsFromFile(ExpandConstant('{commonappdata}\Vyaptek\HMS\backups\last-backup.txt'), Lines) then
+    Result := ResultValue(Lines, 'message');
+  if Result = '' then
+    Result := 'the backup script did not report back';
+end;
+
+// Before an upgrade changes anything (OP11): this release's migrations cannot be undone, and PostgreSQL
+// may be updated too. With HMS stopped, so nothing changes during the backup. This release's own script
+// and age (from {tmp}): the box may not have them yet.
+function BackupBeforeUpgrade: String;
+var
+  Code: Integer;
+begin
+  Result := '';
+  if not PGInstalled or (DBPage.SelectedValueIndex <> 0) then
+    Exit;
+  ExtractTemporaryFile('backup-database.ps1');
+  ExtractTemporaryFile('age.exe');
+  ExtractTemporaryFile('age-keygen.exe');
+  ExtractTemporaryFile('backup-master-key.txt');
+  WizardForm.PreparingLabel.Caption := 'Backing up the hospital data before the upgrade...';
+  WizardForm.PreparingLabel.Visible := True;
+  if Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\backup-database.ps1') +
+       '" -AppDir "' + RemoveBackslashUnlessRoot(WizardDirValue) + '" -Reason upgrade -ToolsDir "' + ExpandConstant('{tmp}') + '"',
+       '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
+  begin
+    BackupResult := 'The hospital data was backed up before the upgrade, in ' +
+      ExpandConstant('{commonappdata}\Vyaptek\HMS\backups') + '.';
+    Exit;
+  end;
+  // A silent install answers No: it never upgrades without a backup.
+  if SuppressibleMsgBox('Setup couldn''t back up the hospital data before upgrading: ' + BackupMessage + '.' + #13#10#13#10 +
+       'Upgrade anyway, without a backup? An upgrade cannot be undone.', mbError, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
+    BackupResult := 'The upgrade went ahead WITHOUT a backup (' + BackupMessage + ').'
+  else
+    Result := 'The upgrade was cancelled because the hospital data could not be backed up (' + BackupMessage +
+      '). Nothing was changed. Send this message to Vyaptek.';
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Exec('sc.exe', 'stop VyaptekHMS',    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -891,7 +1038,15 @@ begin
   // Boxes installed before Garnet: garnet-install.bat removes the service once Garnet is in place.
   Exec('sc.exe', 'stop VyaptekRedis',  '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(3000);
-  Result := '';
+  Result := BackupBeforeUpgrade;
+  // Cancelled: start HMS again as it was, since nothing was replaced.
+  if Result <> '' then
+  begin
+    Exec('sc.exe', 'start VyaptekGarnet', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('sc.exe', 'start VyaptekRedis',  '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('sc.exe', 'start VyaptekHMS',    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('sc.exe', 'start NginxWebProxy', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
 end;
 
 [InstallDelete]
@@ -916,7 +1071,7 @@ Source: "jre\*"; DestDir: "{app}\jre"; Flags: recursesubdirs createallsubdirs ig
 
 ;    Installers — extracted to temp and deleted after use
 Source: "libreoffice.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall nocompression; Check: ShouldInstallLibreOffice
-Source: "pg.exe";   DestDir: "{tmp}"; Flags: deleteafterinstall; Check: ShouldInstallPG
+Source: "pg.exe";   DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NeedsPgInstaller
 
 ; 2. Pre-flight SQL (extensions + role only — Flyway migrates on first backend start)
 Source: "setup_database.sql"; DestDir: "{app}"
@@ -940,6 +1095,19 @@ Source: "fix-signing-key.xml"; DestDir: "{app}"
 ;    Host evidence for an audit (OP12): BitLocker, antivirus, firewall, updates, services, ports.
 Source: "Check-HMS-Host.bat"; DestDir: "{app}"
 Source: "check-host.ps1";     DestDir: "{app}"
+;    Encrypted backups (OP11): nightly, and before every upgrade, which runs this release's copies from
+;    {tmp} (the dontcopy lines) before anything is replaced. age encrypts them; only Vyaptek's key opens
+;    them. Restore-HMS-Backup.bat puts one back.
+Source: "backup-database.ps1";   DestDir: "{app}"
+Source: "restore-backup.ps1";    DestDir: "{app}"
+Source: "Restore-HMS-Backup.bat"; DestDir: "{app}"
+Source: "backup-master-key.txt"; DestDir: "{app}"
+Source: "age\age.exe";           DestDir: "{app}"; Flags: ignoreversion
+Source: "age\age-keygen.exe";    DestDir: "{app}"; Flags: ignoreversion
+Source: "backup-database.ps1";   Flags: dontcopy
+Source: "backup-master-key.txt"; Flags: dontcopy
+Source: "age\age.exe";           Flags: dontcopy
+Source: "age\age-keygen.exe";    Flags: dontcopy
 
 ; 3. Backend (Spring Boot JAR + WinSW)
 ;    Never ship backend\config: it holds each box's own secrets, and copying one over an install
@@ -994,6 +1162,9 @@ Name: "{commonprograms}\Vyaptek HMS"; Filename: "http://localhost/"; IconFilenam
 [Run]
 ; 1. PostgreSQL 18 — skipped if already installed and user chose to keep it
 Filename: "{tmp}\pg.exe"; Parameters: "--mode unattended --unattendedmodeui none --superpassword ""admin"" --serverport 5432 --prefix ""{app}\pgsql"""; Flags: runhidden; StatusMsg: "Installing PostgreSQL 18..."; Check: ShouldInstallPG
+; 1'. An upgrade on a box with an older 18.x: the same installer updates it in place, keeping its data and
+;     settings (it ignores these options then). After the backup in PrepareToInstall.
+Filename: "{tmp}\pg.exe"; Parameters: "--mode unattended --unattendedmodeui none --prefix ""{app}\pgsql"""; Flags: runhidden waituntilterminated; StatusMsg: "Updating PostgreSQL to {#PostgresVersion}..."; Check: ShouldPatchPG; AfterInstall: CheckPostgresPatched
 
 ; 2a. Clean install — drop existing DB, recreate, run SQL
 Filename: "{app}\clean_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"" ""{app}\backend\config"""; Flags: runhidden; StatusMsg: "Resetting database..."; Check: ShouldCleanDB
@@ -1057,6 +1228,9 @@ Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidd
 Filename: "{app}\nginx-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting User Interface..."
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\wait-for-backend.ps1"" -ResultFile ""{tmp}\backend-status.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Starting HMS -- this can take a few minutes..."; Check: DatabaseReady; AfterInstall: CheckBackendStarted
 
+; 8a. The nightly encrypted backup (OP11), registered again on every run.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\backup-database.ps1"" -Schedule"; Flags: runhidden waituntilterminated; StatusMsg: "Scheduling the nightly backup..."
+
 ; 9. Firewall: port 80 from the hospital's own network only (OP6): this computer's subnets and the
 ;    private address ranges (routed VLANs between wards use them), never the internet. Every network
 ;    profile, because Windows marks a network nobody classified as Public. Deleted first: "add rule"
@@ -1076,6 +1250,9 @@ Filename: "{app}\garnet\garnet-service.exe"; Parameters: "uninstall"; Flags: run
 Filename: "{sys}\sc.exe"; Parameters: "stop VyaptekRedis";   Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "delete VyaptekRedis"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name=""Vyaptek HMS Web"""""; Flags: runhidden; RunOnceId: "RemoveFirewallRule"
+;    The nightly backup. The backups themselves (%ProgramData%\Vyaptek\HMS\backups) are the hospital's
+;    data and stay.
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""\Vyaptek\Vyaptek HMS Backup"" /F"; Flags: runhidden; RunOnceId: "RemoveBackupTask"
 
 ; backend\config (the box's secrets) is kept on uninstall on purpose: PostgreSQL is not uninstalled,
 ; and that file holds the only copy of its superuser password (backend plan 24, I3). The folder is

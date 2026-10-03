@@ -7,7 +7,8 @@
   Each line is PASS, WARN or INFO with what was seen:
     BitLocker on the system drive, Defender (real-time protection, signature age), the three firewall
     profiles, SMBv1, Remote Desktop and network-level authentication, Windows updates still pending,
-    the HMS services and the accounts they run as, and every listening TCP port with its process.
+    the HMS services and the accounts they run as, the nightly backup, and every listening TCP port
+    with its process.
 #>
 param(
   [string]$OutFile = (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) ("host-check-{0}-{1}.txt" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd-HHmm'))),
@@ -101,6 +102,21 @@ Try-Check 'Services' {
     $level = if ($svc.StartName -eq 'LocalSystem') { 'WARN' } else { 'PASS' }
     Add-Line $level "$name is $($svc.State), runs as $($svc.StartName)."
   }
+}
+
+Add-Heading 'Backups'
+Try-Check 'Backups' {
+  $root = Join-Path $env:ProgramData 'Vyaptek\HMS\backups'
+  $task = Get-ScheduledTask -TaskPath '\Vyaptek\' -TaskName 'Vyaptek HMS Backup' -ErrorAction SilentlyContinue
+  if ($task) { Add-Line 'PASS' "The nightly backup task is $($task.State)." } else { Add-Line 'WARN' 'The nightly backup task is missing; run the HMS installer again.' }
+  $status = @{}
+  Get-Content (Join-Path $root 'last-backup.txt') -ErrorAction SilentlyContinue | ForEach-Object { $k, $v = $_ -split '=', 2; $status[$k] = $v }
+  if (-not $status.status) { Add-Line 'WARN' "No backup has run yet ($root)." }
+  elseif ($status.status -ne 'OK') { Add-Line 'WARN' "The last backup FAILED at $($status.time): $($status.message)" }
+  elseif ((Get-Date) - [datetime]$status.time -gt (New-TimeSpan -Hours 36)) { Add-Line 'WARN' "The last backup is from $($status.time), more than a day and a half ago." }
+  else { Add-Line 'PASS' "Last backup $($status.time): $($status.set)." }
+  $sets = @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName 'backup.txt') })
+  Add-Line 'INFO' "$($sets.Count) backup set(s) on this computer, encrypted so that only Vyaptek can read them. A copy kept off this computer is the hospital's to arrange."
 }
 
 Add-Heading 'Listening TCP ports'
