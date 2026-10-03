@@ -1,4 +1,1 @@
-# Vyaptek's backup key (backup-database.ps1, backend plan 24 section 11, OP11): its public half, the line
-# starting age1. No key yet: until one is put here, no backup can be written and CI refuses to build a
-# release. Make the key pair with backend scripts/new-backup-master-key.sh and put the age1... line it
-# prints below this comment. The private key never comes here.
+age1qjqgpz8aze3dpt8ce3q0aa2anl0ufaetx4zu6sqmqr950vjav9hs5kzq3q
