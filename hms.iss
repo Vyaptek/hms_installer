@@ -60,6 +60,8 @@ var
   // Set when the person gave up on Retry: the box's secrets, or the database update, are missing, so
   // the backend is not started (plan 24 §11, OP8: there is no fallback password any more).
   SecretsFailed, DatabaseFailed: Boolean;
+  // Shown on the last page: the service accounts (OP2) and whether the backend came up after start.
+  AccountsResult, BackendResult: String;
   AppBrowserChecked: Boolean;
   AppBrowserPath: String;
   DBPage: TInputOptionWizardPage;
@@ -508,6 +510,10 @@ begin
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + LicenseResult;
     if AbdmResult <> '' then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + AbdmResult;
+    if AccountsResult <> '' then
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + AccountsResult;
+    if BackendResult <> '' then
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + BackendResult;
     if SecretsFailed or DatabaseFailed then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
         'HMS was NOT started: the database could not be secured or updated. Run this installer again.';
@@ -704,6 +710,54 @@ begin
   end;
 end;
 
+function ServiceAccountsLog: String;
+begin
+  Result := ExpandConstant('{app}\backend\logs\service-accounts.log');
+end;
+
+// service-accounts.ps1 sets the folder permissions before it changes either service's account, so when
+// it fails the services still run as LocalSystem, as before OP2: HMS works, and the next run tries again.
+procedure CheckServiceAccounts;
+var
+  Lines: TArrayOfString;
+  I: Integer;
+begin
+  if not LoadStringsFromFile(ServiceAccountsLog, Lines) then
+    SetArrayLength(Lines, 0);
+  for I := 0 to GetArrayLength(Lines) - 1 do
+    if Pos('Could not set up the service accounts', Lines[I]) > 0 then
+    begin
+      AccountsResult := 'HMS still runs as the Windows system account: its own accounts could not be set ' +
+        'up. HMS works; run this installer again, or send ' + ServiceAccountsLog + ' to Vyaptek.';
+      Exit;
+    end;
+end;
+
+// wait-for-backend.ps1's one line: UP, STOPPED or STARTING. Nothing is rolled back in any case: an
+// upgraded database cannot go back to the old version.
+procedure CheckBackendStarted;
+var
+  Lines: TArrayOfString;
+  Status, Logs: String;
+begin
+  if LoadStringsFromFile(ExpandConstant('{tmp}\backend-status.txt'), Lines) then
+    Status := ResultValue(Lines, 'status')
+  else
+    Status := '';
+  Logs := ExpandConstant('{app}\backend\logs');
+  if Status = 'UP' then
+    Exit;
+  if Status = 'STOPPED' then
+  begin
+    BackendResult := 'HMS did not start: the Vyaptek HMS service stopped. Send the newest files in ' + Logs +
+      ' to Vyaptek.';
+    SuppressibleMsgBox(BackendResult, mbError, MB_OK, IDOK);
+  end
+  else
+    BackendResult := 'HMS is still starting. Check again in a few minutes; if it does not open, send the ' +
+      'newest files in ' + Logs + ' to Vyaptek.';
+end;
+
 function SecretsReady: Boolean;
 begin
   Result := not SecretsFailed;
@@ -871,6 +925,11 @@ Source: "clean_db.bat";       DestDir: "{app}"; Flags: deleteafterinstall
 Source: "free-port-80.bat";   DestDir: "{app}"
 ;    Migrates the database and sets the backend's accounts, as the superuser (plan 24 §11, OP1).
 Source: "setup-database.bat"; DestDir: "{app}"
+;    PostgreSQL on this computer only (OP7), the services' own accounts and folders (OP2, OP3), and the
+;    wait for the backend after it starts (OP2).
+Source: "secure-postgres.ps1";  DestDir: "{app}"
+Source: "service-accounts.ps1"; DestDir: "{app}"
+Source: "wait-for-backend.ps1"; DestDir: "{app}"
 ;    Support without manual steps (OP1, OP8): a 4-hour pgAdmin login, and Vyaptek-signed one-box fixes.
 ;    Both ask for administrator rights; only Administrators can read the superuser's password.
 Source: "HMS-DB-Support.bat"; DestDir: "{app}"
@@ -968,28 +1027,39 @@ Filename: "{app}\garnet\garnet-install.bat"; Parameters: """{app}\garnet"""; Fla
 ;    REGISTER_NO_MSO_TYPES=1 leaves .docx/.xlsx opening in MS Office on PCs that have it.
 Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\libreoffice.msi"" /qn /norestart ADDLOCAL=ALL REMOVE=gm_o_Onlineupdate REGISTER_NO_MSO_TYPES=1 QUICKSTART=0 ISCHECKFORPRODUCTUPDATES=0 CREATEDESKTOPLINK=0 RebootYesNo=No UI_LANGS=en_US"; Flags: runhidden; StatusMsg: "Installing LibreOffice (PDF reports)..."; Check: ShouldInstallLibreOffice
 
-; 6. The database: this release's migrations and the backend's accounts, as the superuser (OP1). The
+; 6. PostgreSQL listens on this computer only and takes SCRAM passwords only (OP7), before anything
+;    signs in to it below.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\secure-postgres.ps1"" -ConfigDir ""{app}\backend\config"" -PgBin ""{app}\pgsql\bin"" -LogFile ""{app}\backend\logs\secure-postgres.log"""; Flags: runhidden waituntilterminated; StatusMsg: "Updating the hospital database..."; Check: SecretsReady
+;    The database: this release's migrations and the backend's accounts, as the superuser (OP1). The
 ;    backend's own account cannot change the schema, so this runs before it starts, on every run.
 Filename: "{app}\setup-database.bat"; Parameters: """{app}"""; Flags: runhidden waituntilterminated; StatusMsg: "Updating the hospital database..."; Check: SecretsReady; AfterInstall: CheckDatabaseSetUp
 ;    Support logins (HMS-DB-Support.bat) whose 4 hours are over: they can no longer sign in; this removes them.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\hms-db-support.ps1"" -CleanupOnly"; Flags: runhidden waituntilterminated; StatusMsg: "Updating the hospital database..."; Check: DatabaseReady
 
-; 7. Backend
+; 7. Register the backend and nginx, then run each as its own account (OP2) before either starts.
 Filename: "{app}\backend\hms-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
 ;    On every run: WinSW does not update an existing service, so a box upgraded from Redis would
 ;    otherwise keep waiting on the removed VyaptekRedis and the backend would never start.
 Filename: "{sys}\sc.exe"; Parameters: "config VyaptekHMS depend= postgresql-x64-18/VyaptekGarnet"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
-Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."; Check: DatabaseReady
-
-; 8. Nginx + React frontend
 ;    Free port 80 first -- stop & disable the IIS/HTTP stack (W3SVC/WAS) that
 ;    otherwise squats on port 80 and prevents Nginx from binding.
 Filename: "{app}\free-port-80.bat"; Flags: runhidden; StatusMsg: "Freeing web port 80..."
 Filename: "{app}\nginx-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Web Server..."
-Filename: "{app}\nginx-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting User Interface..."
+;    Their own Windows accounts and folders; the uploads move from C:\data\uploads once (OP3).
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\service-accounts.ps1"" -AppDir ""{app}"" -LogFile ""{app}\backend\logs\service-accounts.log"""; Flags: runhidden waituntilterminated; StatusMsg: "Setting up the HMS service accounts..."; AfterInstall: CheckServiceAccounts
 
-; 9. Firewall — port 80 only (Garnet 6379 and backend 8080 listen on 127.0.0.1 only; PG 5432: plan 24 OP7)
-Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall add rule name=""Vyaptek HMS Web"" dir=in action=allow protocol=TCP localport=80 profile=any"""; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
+; 8. Start the backend and nginx (the React frontend), then wait up to 10 minutes for the backend to
+;    answer (OP2).
+Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."; Check: DatabaseReady
+Filename: "{app}\nginx-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting User Interface..."
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\wait-for-backend.ps1"" -ResultFile ""{tmp}\backend-status.txt"""; Flags: runhidden waituntilterminated; StatusMsg: "Starting HMS -- this can take a few minutes..."; Check: DatabaseReady; AfterInstall: CheckBackendStarted
+
+; 9. Firewall: port 80 from the hospital's own network only (OP6): this computer's subnets and the
+;    private address ranges (routed VLANs between wards use them), never the internet. Every network
+;    profile, because Windows marks a network nobody classified as Public. Deleted first: "add rule"
+;    added another copy on every run. Garnet 6379 and the backend 8080 listen on 127.0.0.1 only, and
+;    PostgreSQL does too (OP7).
+Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name=""Vyaptek HMS Web"" >nul 2>&1 & netsh advfirewall firewall add rule name=""Vyaptek HMS Web"" dir=in action=allow protocol=TCP localport=80 profile=any remoteip=LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"""; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
 
 [UninstallRun]
 ; Stop and remove in reverse startup order
@@ -1013,3 +1083,5 @@ Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name
 ; only the cache password, which nothing needs once HMS is gone.
 Type: files; Name: "{app}\garnet\garnet.conf"
 Type: filesandordirs; Name: "{app}\garnet\logs"
+; The backend's temp folder (OP2). Its uploads folder next to it is the hospital's data and stays.
+Type: filesandordirs; Name: "{commonappdata}\Vyaptek\HMS\temp"

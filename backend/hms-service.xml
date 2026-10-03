@@ -5,7 +5,9 @@
   <!-- The installer's own Java runtime ({app}\jre), not %JAVA_HOME%: another Java installed on the
        PC later can change JAVA_HOME, and the backend is built for Java 25. -->
   <executable>%BASE%\..\jre\bin\java.exe</executable>
-  <arguments>-Xmx512m -jar "%BASE%\hms.jar"</arguments>
+  <!-- java.io.tmpdir: a folder only this service (NT SERVICE\VyaptekHMS), SYSTEM and Administrators can
+       open, made by service-accounts.ps1. LibreOffice's per-process profiles go under it too. -->
+  <arguments>-Xmx512m -Djava.io.tmpdir="%ProgramData%\Vyaptek\HMS\temp" -jar "%BASE%\hms.jar"</arguments>
   <!-- Spring Boot reads config\application.properties (this box's secrets, written by
        write-secrets.ps1) relative to the working directory, so pin it to this folder. -->
   <workingdirectory>%BASE%</workingdirectory>
@@ -38,4 +40,8 @@
   <!-- Only nginx on this machine reaches the backend (backend plan 24, I4). The relay pull worker
        replays callbacks to localhost, which this still serves. -->
   <env name="SERVER_ADDRESS" value="127.0.0.1"/>
+  <!-- Uploaded report files (backend plan 24 section 11, OP3). Until 2026-10 nothing set this and they went
+       to C:\data\uploads, which every signed-in user could change; service-accounts.ps1 moves them here
+       once and locks the folder to this service. -->
+  <env name="FILE_STORAGE_DIR" value="%ProgramData%\Vyaptek\HMS\uploads"/>
 </service>
