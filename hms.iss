@@ -1,10 +1,15 @@
-; Set by the CI workflow (/DAppVersion, /DLibreOfficeVersion); these defaults are for local builds.
+; Set by the CI workflow (/DAppVersion, /DLibreOfficeVersion, /DDotNetVersion); these defaults are for
+; local builds.
 #ifndef AppVersion
   #define AppVersion "0.0.0-local"
 #endif
 ; The bundled libreoffice.msi's version, as soffice.exe reports it.
 #ifndef LibreOfficeVersion
   #define LibreOfficeVersion "26.2.6.3"
+#endif
+; The bundled .NET runtime's version (dotnet-runtime.exe), which Garnet, the cache server, runs on.
+#ifndef DotNetVersion
+  #define DotNetVersion "10.0.12"
 #endif
 ; Vyaptek's ABDM relay. Fixed in the build, not typed at the hospital, so the product key used to set
 ; ABDM up can only ever be sent to Vyaptek.
@@ -51,6 +56,7 @@ var
   ResultCode: Integer;
   PGInstalled: Boolean;
   LibreOfficeChecked, LibreOfficeNeeded: Boolean;
+  DotNetChecked, DotNetNeeded: Boolean;
   AppBrowserChecked: Boolean;
   AppBrowserPath: String;
   DBPage: TInputOptionWizardPage;
@@ -551,31 +557,48 @@ begin
   Result := LicenseSkipped;
 end;
 
-// The password on the last "requirepass" line of the Redis config (the one Redis uses), or ''.
-function RedisRequirePass(const Conf: TArrayOfString): String;
+function GarnetConf: String;
+begin
+  Result := ExpandConstant('{app}\garnet\garnet.conf');
+end;
+
+// The password in garnet.conf, or ''. write-secrets.ps1 writes it on a line of its own:
+//   "Password": "<letters and digits>",
+function GarnetPassword(const Conf: TArrayOfString): String;
 var
-  I: Integer;
+  I, Q: Integer;
+  S: String;
 begin
   Result := '';
   for I := 0 to GetArrayLength(Conf) - 1 do
-    if Pos('requirepass ', Conf[I]) = 1 then
-      Result := Trim(Copy(Conf[I], Length('requirepass ') + 1, Length(Conf[I])));
+  begin
+    S := Trim(Conf[I]);
+    if Pos('"Password":', S) <> 1 then
+      Continue;
+    S := Trim(Copy(S, Length('"Password":') + 1, Length(S)));
+    if Pos('"', S) <> 1 then
+      Exit;
+    S := Copy(S, 2, Length(S));
+    Q := Pos('"', S);
+    if Q > 0 then
+      Result := Copy(S, 1, Q - 1);
+    Exit;
+  end;
 end;
 
 // Without the secret file the backend refuses to start, so say so rather than finish quietly. The same
-// for a Redis password that the Redis config does not carry: every sign-in then answers "Sign-in is
-// temporarily unavailable". Seen 2026-09-30 on a box whose redis.windows-service.conf had no
-// requirepass while application.properties had a Redis password; write-secrets.ps1 runs hidden, so
-// a run that stopped before its Redis step went unnoticed.
+// for a cache password that garnet.conf does not carry: every sign-in then answers "Sign-in is
+// temporarily unavailable". Seen 2026-09-30 with the old Redis, on a box whose Redis config had no
+// requirepass while application.properties had a password; write-secrets.ps1 runs hidden, so a run
+// that stopped before its cache step went unnoticed.
 procedure CheckSecretsWritten;
 var
   Props, Conf: TArrayOfString;
-  RedisPw, Fix: String;
+  CachePw, Fix: String;
 begin
   Fix := 'As an administrator run: powershell -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{app}\write-secrets.ps1') + '" -ConfigDir "' + ExpandConstant('{app}\backend\config') +
-    '" -RedisConf "' + ExpandConstant('{app}\redis\redis.windows-service.conf') +
-    '", then restart the VyaptekRedis and VyaptekHMS services.';
+    '" -GarnetConf "' + GarnetConf + '", then restart the VyaptekGarnet and VyaptekHMS services.';
   if not LoadStringsFromFile(ExpandConstant('{app}\backend\config\application.properties'), Props) then
   begin
     SuppressibleMsgBox('The sign-in key file could not be created in ' +
@@ -583,13 +606,48 @@ begin
       mbCriticalError, MB_OK, IDOK);
     Exit;
   end;
-  RedisPw := ResultValue(Props, 'spring.data.redis.password');
-  if not LoadStringsFromFile(ExpandConstant('{app}\redis\redis.windows-service.conf'), Conf) then
+  // The backend still names it spring.data.redis.password: it talks to Garnet as to Redis.
+  CachePw := ResultValue(Props, 'spring.data.redis.password');
+  if not LoadStringsFromFile(GarnetConf, Conf) then
     SetArrayLength(Conf, 0);
-  if (RedisPw = '') or (RedisRequirePass(Conf) <> RedisPw) then
-    SuppressibleMsgBox('The Redis password was not set up: application.properties and ' +
-      'redis.windows-service.conf do not agree, so nobody will be able to sign in. ' + Fix,
+  if (CachePw = '') or (GarnetPassword(Conf) <> CachePw) then
+    SuppressibleMsgBox('The cache server password was not set up: application.properties and ' +
+      'garnet.conf do not agree, so nobody will be able to sign in. ' + Fix,
       mbCriticalError, MB_OK, IDOK);
+end;
+
+// The .NET runtime Garnet needs: install the bundled one unless this computer already has the same
+// 10.0 line at this patch or later (a newer one the hospital or Windows Update put in is left alone).
+// Worked out once, because [Files] and [Run] both ask.
+function ShouldInstallDotNet: Boolean;
+var
+  Dir, Bundled: String;
+  FindRec: TFindRec;
+  InstalledPacked, BundledPacked: Int64;
+begin
+  if not DotNetChecked then
+  begin
+    DotNetNeeded := True;
+    Bundled := '{#DotNetVersion}';
+    Dir := ExpandConstant('{commonpf64}\dotnet\shared\Microsoft.NETCore.App\');
+    // Only the same major.minor counts (10.0.12 -> 10.0.*): a framework-dependent app rolls forward
+    // across patches, not across minor versions.
+    if StrToVersion(Bundled, BundledPacked) and FindFirst(Dir + ChangeFileExt(Bundled, '.*'), FindRec) then
+    begin
+      try
+        repeat
+          if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0) and
+             StrToVersion(FindRec.Name, InstalledPacked) and
+             (ComparePackedVersion(InstalledPacked, BundledPacked) >= 0) then
+            DotNetNeeded := False;
+        until not FindNext(FindRec);
+      finally
+        FindClose(FindRec);
+      end;
+    end;
+    DotNetChecked := True;
+  end;
+  Result := DotNetNeeded;
 end;
 
 // nginx answers only for host names it knows (backend plan 24, L5): localhost, IPv4 addresses (in
@@ -677,6 +735,8 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Exec('sc.exe', 'stop VyaptekHMS',    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('sc.exe', 'stop NginxWebProxy', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'stop VyaptekGarnet', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Boxes installed before Garnet: garnet-install.bat removes the service once Garnet is in place.
   Exec('sc.exe', 'stop VyaptekRedis',  '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(3000);
   Result := '';
@@ -689,6 +749,12 @@ Type: filesandordirs; Name: "{app}\frontend"
 Type: files; Name: "{app}\backend\hms.jar"
 ; Replace the Java runtime whole, so files a newer JRE dropped don't linger
 Type: filesandordirs; Name: "{app}\jre"
+; The same for Garnet's binaries; its logs folder and garnet.conf (rewritten every run) stay
+Type: files; Name: "{app}\garnet\*.exe"
+Type: files; Name: "{app}\garnet\*.dll"
+Type: filesandordirs; Name: "{app}\garnet\extensions"
+; The Windows Redis port that Garnet replaced (backend plan 24 §11, OP4)
+Type: filesandordirs; Name: "{app}\redis"
 
 [Files]
 ; 1. Java runtime — a private Temurin JRE that only the backend service uses (hms-service.xml).
@@ -734,12 +800,16 @@ Source: "nginx\html\*";    DestDir: "{app}\nginx\html"; Flags: recursesubdirs cr
 Source: "nginx-service.exe"; DestDir: "{app}"
 Source: "nginx-service.xml"; DestDir: "{app}"
 
-; 6. Redis — server, config, and install script only
-;    No .pdb debug symbols, no benchmark/check tools, no WinSW (using sc create instead)
-Source: "redis\redis-server.exe";           DestDir: "{app}\redis"
-Source: "redis\EventLog.dll";               DestDir: "{app}\redis"
-Source: "redis\redis.windows-service.conf"; DestDir: "{app}\redis"
-Source: "redis\redis-install.bat";          DestDir: "{app}\redis"
+; 6. Garnet, the cache server that holds sessions: Microsoft's, speaking the Redis protocol, in place of
+;    the archived Windows Redis 5 port (backend plan 24 §11, OP4). CI stages the pinned release into
+;    garnet\bin (without its sample garnet.conf; write-secrets.ps1 writes this box's). WinSW runs it,
+;    as it runs nginx and the backend.
+Source: "garnet\bin\*";              DestDir: "{app}\garnet"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "garnet\garnet-service.xml"; DestDir: "{app}\garnet"
+Source: "garnet\garnet-install.bat"; DestDir: "{app}\garnet"
+Source: "nginx-service.exe";         DestDir: "{app}\garnet"; DestName: "garnet-service.exe"
+;    The .NET runtime Garnet runs on, when this computer lacks it.
+Source: "dotnet-runtime.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall nocompression; Check: ShouldInstallDotNet
 
 ; 7. The HMS icon (made from hms_webapp public/logo.svg) for the shortcuts below and Apps & features.
 Source: "hms.ico"; DestDir: "{app}"
@@ -765,9 +835,10 @@ Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_da
 ; 3. The box's own secrets (backend plan 24, C2, C6, I3): the sign-in key (kept on upgrade; a box that
 ;    never had one gets one, which logs everyone out once), the admin password on a new database, a
 ;    random PostgreSQL superuser password instead of "admin" (again when the database is new) and a
-;    Redis password. Before Redis is (re)installed, so it starts with its password.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"" -AdminEmailFile ""{tmp}\admin-email.txt"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"" -NewDatabase"; Flags: runhidden waituntilterminated; StatusMsg: "Generating this computer's keys..."; Check: NeedsAdminPassword; AfterInstall: CheckSecretsWritten
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -PgBin ""{app}\pgsql\bin"" -RedisConf ""{app}\redis\redis.windows-service.conf"""; Flags: runhidden waituntilterminated; StatusMsg: "Checking this computer's keys..."; Check: KeepsDatabase; AfterInstall: CheckSecretsWritten
+;    cache (Garnet) password with Garnet's whole config. Before Garnet is (re)registered, so it starts
+;    with its password.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"" -AdminEmailFile ""{tmp}\admin-email.txt"" -PgBin ""{app}\pgsql\bin"" -GarnetConf ""{app}\garnet\garnet.conf"" -NewDatabase"; Flags: runhidden waituntilterminated; StatusMsg: "Generating this computer's keys..."; Check: NeedsAdminPassword; AfterInstall: CheckSecretsWritten
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -PgBin ""{app}\pgsql\bin"" -GarnetConf ""{app}\garnet\garnet.conf"""; Flags: runhidden waituntilterminated; StatusMsg: "Checking this computer's keys..."; Check: KeepsDatabase; AfterInstall: CheckSecretsWritten
 
 ; 3a. The product key, when one was entered: into the locked config folder from step 3, for the backend
 ;     to activate at its first start (it then deletes the file and writes license-activated).
@@ -782,9 +853,10 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Fil
 ; 3c. ABDM refuses replies stamped more than ~15 minutes off, so keep the clock synced.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\time-sync.ps1"""; Flags: runhidden waituntilterminated; StatusMsg: "Setting up time sync..."; Check: IsAbdmEnrolled
 
-; 4. Redis — use Redis native service installer.
-;    Do NOT use sc create; Redis console mode is not a valid Windows service entrypoint.
-Filename: "{app}\redis\redis-install.bat"; Parameters: """{app}\redis"""; Flags: runhidden; StatusMsg: "Registering and starting Redis..."
+; 4. Garnet: the .NET runtime first when missing, then the service (which also removes the old
+;    VyaptekRedis, on the same port).
+Filename: "{tmp}\dotnet-runtime.exe"; Parameters: "/install /quiet /norestart"; Flags: runhidden waituntilterminated; StatusMsg: "Installing the .NET runtime (cache server)..."; Check: ShouldInstallDotNet
+Filename: "{app}\garnet\garnet-install.bat"; Parameters: """{app}\garnet"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering and starting the cache server..."
  
 ; 5. LibreOffice, for PDF reports. Without it the backend still runs, but every PDF fails.
 ;    REGISTER_NO_MSO_TYPES=1 leaves .docx/.xlsx opening in MS Office on PCs that have it.
@@ -792,6 +864,9 @@ Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\libreoffice.msi"" /qn /norestar
 
 ; 6. Backend — Flyway migrates on first boot (may take ~30s on first install)
 Filename: "{app}\backend\hms-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
+;    On every run: WinSW does not update an existing service, so a box upgraded from Redis would
+;    otherwise keep waiting on the removed VyaptekRedis and the backend would never start.
+Filename: "{sys}\sc.exe"; Parameters: "config VyaptekHMS depend= postgresql-x64-18/VyaptekGarnet"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
 Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."
 
 ; 7. Nginx + React frontend
@@ -801,7 +876,7 @@ Filename: "{app}\free-port-80.bat"; Flags: runhidden; StatusMsg: "Freeing web po
 Filename: "{app}\nginx-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Web Server..."
 Filename: "{app}\nginx-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting User Interface..."
 
-; 8. Firewall — port 80 only (Redis 6379, PG 5432, backend 8080 are localhost-only)
+; 8. Firewall — port 80 only (Garnet 6379 and backend 8080 listen on 127.0.0.1 only; PG 5432: plan 24 OP7)
 Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall add rule name=""Vyaptek HMS Web"" dir=in action=allow protocol=TCP localport=80 profile=any"""; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
 
 [UninstallRun]
@@ -810,6 +885,9 @@ Filename: "{app}\nginx-service.exe";         Parameters: "stop";      Flags: run
 Filename: "{app}\nginx-service.exe";         Parameters: "uninstall"; Flags: runhidden
 Filename: "{app}\backend\hms-service.exe";   Parameters: "stop";      Flags: runhidden
 Filename: "{app}\backend\hms-service.exe";   Parameters: "uninstall"; Flags: runhidden
+Filename: "{app}\garnet\garnet-service.exe"; Parameters: "stop";      Flags: runhidden
+Filename: "{app}\garnet\garnet-service.exe"; Parameters: "uninstall"; Flags: runhidden
+;    A box never upgraded since Garnet still has the old Redis service.
 Filename: "{sys}\sc.exe"; Parameters: "stop VyaptekRedis";   Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "delete VyaptekRedis"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name=""Vyaptek HMS Web"""""; Flags: runhidden; RunOnceId: "RemoveFirewallRule"
@@ -817,3 +895,9 @@ Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall delete rule name
 ; backend\config (the box's secrets) is kept on uninstall on purpose: PostgreSQL is not uninstalled,
 ; and that file holds the only copy of its superuser password (backend plan 24, I3). The folder is
 ; readable by SYSTEM and Administrators only. Delete it by hand after removing PostgreSQL.
+
+[UninstallDelete]
+; Written by write-secrets.ps1 and the service, not by [Files], so not removed otherwise. garnet.conf holds
+; only the cache password, which nothing needs once HMS is gone.
+Type: files; Name: "{app}\garnet\garnet.conf"
+Type: filesandordirs; Name: "{app}\garnet\logs"

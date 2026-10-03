@@ -11,10 +11,11 @@
   <workingdirectory>%BASE%</workingdirectory>
   <startmode>Automatic</startmode>
 
-  <!-- Wait for PostgreSQL and Redis before starting. The EDB installer registers
-       PostgreSQL 18 as "postgresql-x64-18" on 64-bit Windows by default. -->
+  <!-- Wait for PostgreSQL and the cache server (Garnet) before starting. The EDB installer registers
+       PostgreSQL 18 as "postgresql-x64-18" on 64-bit Windows by default. WinSW applies these only
+       when it creates the service, so hms.iss also sets them with sc config on every run. -->
   <depend>postgresql-x64-18</depend>
-  <depend>VyaptekRedis</depend>
+  <depend>VyaptekGarnet</depend>
 
   <!-- If startup still fails (e.g. PG accepted the connection after SCM reported
        Running), retry up to three times before giving up. -->
@@ -30,7 +31,9 @@
   <!-- Only a fallback: write-secrets.ps1 gives each box its own PostgreSQL password in
        config\application.properties, which wins over this (backend plan 24, I3). -->
   <env name="DB_PASSWORD" value="admin"/>
-  <env name="REDIS_HOST"  value="localhost"/>
+  <!-- Garnet speaks the Redis protocol, so the backend's Redis settings point at it. 127.0.0.1, not
+       localhost: Garnet listens on IPv4 loopback only (garnet.conf), and localhost may resolve to ::1. -->
+  <env name="REDIS_HOST"  value="127.0.0.1"/>
   <env name="REDIS_PORT"  value="6379"/>
   <!-- Only nginx on this machine reaches the backend (backend plan 24, I4). The relay pull worker
        replays callbacks to localhost, which this still serves. -->

@@ -138,6 +138,8 @@ if ($GarnetConf) {
     $lines = Set-Prop $lines 'spring.data.redis.password' $cachePw
   }
   # One setting per line: hms.iss reads the Password line back to check it matches.
+  # Garnet ignores a key it does not know without a word, so the names are checked against 2.2.0's own
+  # defaults (2.2.0 calls the index IndexMemorySize, not IndexSize).
   # LogMemorySize caps memory (Garnet's default is 16g); nothing is written to disk, as with the old
   # Redis ("save" off), so a restart signs everyone out. Expired keys are swept every 5 minutes
   # (Garnet's default only drops them when read).
@@ -148,7 +150,7 @@ if ($GarnetConf) {
     '  "AuthenticationMode": "Password",',
     ('  "Password": "' + $cachePw + '",'),
     '  "LogMemorySize": "512m",',
-    '  "IndexSize": "64m",',
+    '  "IndexMemorySize": "64m",',
     '  "ExpiredKeyDeletionScanFrequencySecs": 300,',
     '  "EnableLua": false',
     '}'

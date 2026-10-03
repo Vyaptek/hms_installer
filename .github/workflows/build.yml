@@ -23,7 +23,8 @@ on:
 
 # Bundled third-party binaries, pinned by version and SHA-256 so a rebuild of the same tag ships the
 # same bytes. Refresh each quarter (Temurin: https://adoptium.net/temurin/releases/, LibreOffice:
-# https://www.libreoffice.org/download/release-notes/).
+# https://www.libreoffice.org/download/release-notes/, Garnet: https://github.com/microsoft/garnet/releases,
+# .NET: https://dotnet.microsoft.com/download/dotnet/10.0).
 env:
   # Temurin JRE, the backend's runtime on the box. Must match the backend's Gradle toolchain (25).
   JRE_VERSION: 25.0.4.1+1
@@ -34,6 +35,16 @@ env:
   LO_VERSION: 26.2.6.3
   LO_URL: https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.6.3/win/x86_64/LibreOffice_26.2.6.3_Win_x86-64.msi
   LO_SHA256: f9877032fd908beb9c0ddf06df4af5c2e85f419c42e14876c4cce5aae5fb2660
+  # Garnet, the box's cache server (sessions), in place of the archived Windows Redis port (backend
+  # plan 24 §11, OP4). The zip's net10.0 build, which needs the .NET runtime below.
+  GARNET_VERSION: 2.2.0
+  GARNET_URL: https://github.com/microsoft/garnet/releases/download/v2.2.0/win-x64-based-readytorun.zip
+  GARNET_SHA256: 8812ae916dd2386db6ebfaeeee3fb6508024f82ee4c66284532a1a5baa6afea2
+  # .NET runtime (LTS). DOTNET_VERSION is the folder it installs under shared\Microsoft.NETCore.App;
+  # hms.iss skips the install when that 10.0 patch or a later one is there.
+  DOTNET_VERSION: 10.0.12
+  DOTNET_URL: https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.12/dotnet-runtime-10.0.12-win-x64.exe
+  DOTNET_SHA256: 02ea072c08f890f9dc0d3ac71b5fd4c2bfcdced4e1133e2d917ce5422b025585
 
 jobs:
   build:
@@ -147,7 +158,7 @@ jobs:
           gh release download binaries-stable --dir deps `
             --repo ${{ github.repository }} --pattern pg.exe
 
-      - name: Download Java runtime and LibreOffice
+      - name: Download Java runtime, LibreOffice, Garnet and the .NET runtime
         run: |
           function Get-Pinned([string]$url, [string]$sha256, [string]$out) {
             Invoke-WebRequest $url -OutFile $out
@@ -156,7 +167,10 @@ jobs:
           }
           Get-Pinned $env:JRE_URL $env:JRE_SHA256 deps\jre.zip
           Get-Pinned $env:LO_URL $env:LO_SHA256 deps\libreoffice.msi
+          Get-Pinned $env:GARNET_URL $env:GARNET_SHA256 deps\garnet.zip
+          Get-Pinned $env:DOTNET_URL $env:DOTNET_SHA256 deps\dotnet-runtime.exe
           Expand-Archive deps\jre.zip -DestinationPath deps\jre-unzipped
+          Expand-Archive deps\garnet.zip -DestinationPath deps\garnet-unzipped
 
       # ── Assemble staging directory ────────────────────────────────────────
 
@@ -169,6 +183,15 @@ jobs:
           # Large binaries — now land next to hms.iss
           Copy-Item deps\pg.exe          $stage\
           Copy-Item deps\libreoffice.msi $stage\
+          Copy-Item deps\dotnet-runtime.exe $stage\
+
+          # Garnet: the net10.0 server only. Not net8.0, not Service\ (Garnet's own Windows service host;
+          # WinSW runs GarnetServer.exe instead), and not the sample garnet.conf: write-secrets.ps1 writes
+          # each box's own.
+          $garnet = "deps\garnet-unzipped\net10.0"
+          if (-not (Test-Path "$garnet\GarnetServer.exe")) { throw "net10.0\GarnetServer.exe missing after unzip" }
+          New-Item -ItemType Directory -Force "$stage\garnet\bin" | Out-Null
+          Get-ChildItem $garnet -Exclude Service, garnet.conf | Copy-Item -Destination "$stage\garnet\bin" -Recurse
 
           # Java runtime: the zip holds one top-level folder (jdk-25.x+y-jre); hms.iss wants jre\bin\java.exe
           $jreRoot = Get-ChildItem deps\jre-unzipped -Directory | Select-Object -First 1
@@ -207,6 +230,7 @@ jobs:
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             /DAppVersion="$appVersion" `
             /DLibreOfficeVersion="$env:LO_VERSION" `
+            /DDotNetVersion="$env:DOTNET_VERSION" `
             /DAppReleaseDate="${{ steps.ver.outputs.RELEASE_DATE }}" `
             /O"output" `
             "$issFile"
@@ -231,5 +255,5 @@ jobs:
             - hms_webapp `${{ steps.refs.outputs.FRONTEND }}` (`${{ steps.shas.outputs.FRONTEND_SHA }}`)
             - hms_installer `${{ steps.shas.outputs.INSTALLER_SHA }}`
             - HMSSetup.exe SHA-256 `${{ steps.hash.outputs.SHA256 }}`
-            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, PostgreSQL 18 (binaries-stable)
+            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, PostgreSQL 18 (binaries-stable)
           files: output\HMSSetup.exe

@@ -4,6 +4,8 @@ jre/
 pg.exe
 java.msi
 libreoffice.msi
+dotnet-runtime.exe
+garnet/bin/
 frontend/
 backend/hms.jar
 output/
