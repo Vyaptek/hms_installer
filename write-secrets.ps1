@@ -12,10 +12,13 @@
   - hms.bootstrap.admin-username: the email the hospital chose to sign in with (-AdminEmailFile, asked
     with the password since 2026-10-03). Applied with the password and under the same rule; an earlier
     run's copy is dropped the same way.
-  - spring.datasource.password (and the reporting pool's): with -PgBin, the PostgreSQL superuser's
-    password is changed from the installer's old fixed one to a random one, once. With -NewDatabase
-    (this run created the database) it is changed again. If the change fails the file keeps what it
-    had, and the backend falls back to DB_PASSWORD in hms-service.xml.
+  - pg-superuser.secret (with -PgBin): the PostgreSQL superuser's password, changed from the installer's
+    old fixed one to a random one, once, and again with -NewDatabase (this run created the database).
+    Administrators only. A box set up before plan 24 OP1 had it as spring.datasource.password; it is
+    moved here. If the change fails the script fails: there is no fallback password (OP8).
+  - spring.datasource.* and reporting.datasource.* (with -PgBin): the backend's own accounts,
+    hospital_erp_user and hms_reporting, with random passwords created once. setup-database.bat sets
+    them in the database.
   - spring.data.redis.password: with -GarnetConf, a random password for the cache server (Garnet), created
     once, and Garnet's whole config written with it. Restart VyaptekGarnet afterwards (the installer
     re-registers the service right after this script).
@@ -96,9 +99,32 @@ if ($AdminEmailFile -and (Test-Path $AdminEmailFile)) {
   if ($email) { $lines += 'hms.bootstrap.admin-username=' + $email.Replace('\', '\\') }
 }
 
-# I3: the PostgreSQL superuser had the password "admin" on every box.
+# I3: the PostgreSQL superuser had the password "admin" on every box. OP1 (plan 24 §11): its password is
+# kept in pg-superuser.secret, for the installer and the support scripts; the backend never uses it.
+# Before OP1 the backend signed in as the superuser, so its password was spring.datasource.password.
+$superFile = Join-Path $ConfigDir 'pg-superuser.secret'
+
+# Administrators only, re-applied every run (the reset at the top of this script gave it the folder's
+# entries). Until the backend runs as its own service account (OP2) SYSTEM still reads it: LocalSystem
+# is a member of Administrators.
+function Save-Superuser([string]$pw) {
+  Set-Content -Path $superFile -Encoding ASCII -Value $pw
+  Protect-Superuser
+}
+function Protect-Superuser {
+  icacls $superFile /inheritance:r /grant:r '*S-1-5-32-544:F' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "icacls failed on $superFile" }
+}
+
 if ($PgBin) {
-  $current = Get-Prop $lines 'spring.datasource.password'
+  $current = $null
+  if (Test-Path $superFile) {
+    $current = (Get-Content -Raw $superFile).Trim()
+  } elseif (@($null, '', 'postgres') -contains (Get-Prop $lines 'spring.datasource.username')) {
+    $current = Get-Prop $lines 'spring.datasource.password'
+    # Moved out before the backend's own password takes its place below.
+    if ($current) { Save-Superuser $current }
+  }
   if ($NewDatabase -or -not $current) {
     $new = New-Secret 24
     $psql = Join-Path $PgBin 'psql.exe'
@@ -117,13 +143,22 @@ if ($PgBin) {
       Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
       $ErrorActionPreference = 'Stop'
     }
-    if ($changed) {
-      $lines = Set-Prop $lines 'spring.datasource.password' $new
-      $lines = Set-Prop $lines 'reporting.datasource.password' $new
-      # Saved at once: the database already has the new password, so nothing below may lose it.
-      Set-Content -Path $file -Encoding ASCII -Value $lines
-    } else {
-      Write-Warning 'The PostgreSQL password was not changed; the backend keeps using the one in hms-service.xml.'
+    # OP8: no fallback password any more, so fail, and the installer offers Retry.
+    if (-not $changed) { throw 'The PostgreSQL superuser password could not be set. Is the postgresql-x64-18 service running?' }
+    # Saved at once: the database already has the new password, so nothing below may lose it.
+    Save-Superuser $new
+  } elseif (Test-Path $superFile) {
+    Protect-Superuser
+  }
+
+  # The backend's own accounts (OP1). setup-database.bat gives them these passwords in the database
+  # on every run, so a new password here needs nothing else.
+  foreach ($account in @(
+      @{ Prefix = 'spring.datasource'; User = 'hospital_erp_user' },
+      @{ Prefix = 'reporting.datasource'; User = 'hms_reporting' })) {
+    if ((Get-Prop $lines "$($account.Prefix).username") -ne $account.User -or -not (Get-Prop $lines "$($account.Prefix).password")) {
+      $lines = Set-Prop $lines "$($account.Prefix).username" $account.User
+      $lines = Set-Prop $lines "$($account.Prefix).password" (New-Secret 24)
     }
   }
 }

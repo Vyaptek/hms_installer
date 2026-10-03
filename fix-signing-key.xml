@@ -1,0 +1,3 @@
+<!-- Vyaptek's public key for database fixes (run-hms-fix.ps1). No key yet: until one is put here, every
+     fix is refused. Make the key pair with backend scripts/new-box-fix-key.sh and paste the
+     <RSAKeyValue> it prints in place of this comment. The private key never comes here. -->

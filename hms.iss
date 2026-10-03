@@ -57,6 +57,9 @@ var
   PGInstalled: Boolean;
   LibreOfficeChecked, LibreOfficeNeeded: Boolean;
   DotNetChecked, DotNetNeeded: Boolean;
+  // Set when the person gave up on Retry: the box's secrets, or the database update, are missing, so
+  // the backend is not started (plan 24 §11, OP8: there is no fallback password any more).
+  SecretsFailed, DatabaseFailed: Boolean;
   AppBrowserChecked: Boolean;
   AppBrowserPath: String;
   DBPage: TInputOptionWizardPage;
@@ -450,15 +453,22 @@ begin
   end;
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+// Handed to write-secrets.ps1 through a file in {tmp}, never on a command line: other users can read
+// process command lines. {tmp} is private to this run and deleted when it ends. The script deletes
+// them once read, so a retry writes them again.
+procedure SaveAdminFiles;
 begin
-  // Handed to write-secrets.ps1 through a file in {tmp}, never on a command line: other users can
-  // read process command lines. {tmp} is private to this run and deleted when it ends.
-  if (CurStep = ssInstall) and NeedsAdminPassword and (AdminPage.Values[1] <> '') then
+  if NeedsAdminPassword and (AdminPage.Values[1] <> '') then
   begin
     SaveStringToFile(ExpandConstant('{tmp}\admin-password.txt'), AdminPage.Values[1], False);
     SaveStringToFile(ExpandConstant('{tmp}\admin-email.txt'), AdminEmail, False);
   end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+    SaveAdminFiles;
   // Same for the product key: once for the backend to activate, once for ABDM when the license has it
   // and this computer is not connected yet, or is connected as another box than the key's (each script
   // deletes its copy).
@@ -498,6 +508,9 @@ begin
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + LicenseResult;
     if AbdmResult <> '' then
       WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + AbdmResult;
+    if SecretsFailed or DatabaseFailed then
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
+        'HMS was NOT started: the database could not be secured or updated. Run this installer again.';
   end;
 end;
 
@@ -586,24 +599,38 @@ begin
   end;
 end;
 
-// Without the secret file the backend refuses to start, so say so rather than finish quietly. The same
-// for a cache password that garnet.conf does not carry: every sign-in then answers "Sign-in is
-// temporarily unavailable". Seen 2026-09-30 with the old Redis, on a box whose Redis config had no
-// requirepass while application.properties had a password; write-secrets.ps1 runs hidden, so a run
-// that stopped before its cache step went unnoticed.
-procedure CheckSecretsWritten;
+// write-secrets.ps1's arguments, for [Run] and for a retry alike. -NewDatabase when this run created the
+// database: the admin account is new, and the superuser password is changed again.
+function WriteSecretsParams(Param: String): String;
+begin
+  Result := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\write-secrets.ps1') +
+    '" -ConfigDir "' + ExpandConstant('{app}\backend\config') + '" -PgBin "' + ExpandConstant('{app}\pgsql\bin') +
+    '" -GarnetConf "' + GarnetConf + '"';
+  if NeedsAdminPassword then
+    Result := Result + ' -AdminPasswordFile "' + ExpandConstant('{tmp}\admin-password.txt') +
+      '" -AdminEmailFile "' + ExpandConstant('{tmp}\admin-email.txt') + '" -NewDatabase';
+end;
+
+// What is missing from what write-secrets.ps1 should have left, or '' when nothing is. Without the
+// secret file, or without the backend's own database account (OP1), the backend cannot start. A cache
+// password that garnet.conf does not carry turns every sign-in into "Sign-in is temporarily
+// unavailable": seen 2026-09-30 with the old Redis, on a box whose Redis config had no requirepass while
+// application.properties had a password. write-secrets.ps1 runs hidden, so a failed run went unnoticed.
+function SecretsProblem: String;
 var
   Props, Conf: TArrayOfString;
-  CachePw, Fix: String;
+  CachePw: String;
 begin
-  Fix := 'As an administrator run: powershell -ExecutionPolicy Bypass -File "' +
-    ExpandConstant('{app}\write-secrets.ps1') + '" -ConfigDir "' + ExpandConstant('{app}\backend\config') +
-    '" -GarnetConf "' + GarnetConf + '", then restart the VyaptekGarnet and VyaptekHMS services.';
+  Result := '';
   if not LoadStringsFromFile(ExpandConstant('{app}\backend\config\application.properties'), Props) then
   begin
-    SuppressibleMsgBox('The sign-in key file could not be created in ' +
-      ExpandConstant('{app}\backend\config') + '. The HMS backend will not start until it exists. ' + Fix,
-      mbCriticalError, MB_OK, IDOK);
+    Result := 'the sign-in key file could not be created in ' + ExpandConstant('{app}\backend\config');
+    Exit;
+  end;
+  if not FileExists(ExpandConstant('{app}\backend\config\pg-superuser.secret')) or
+     (ResultValue(Props, 'spring.datasource.username') <> 'hospital_erp_user') then
+  begin
+    Result := 'the database password could not be set. Check that the postgresql-x64-18 service is running';
     Exit;
   end;
   // The backend still names it spring.data.redis.password: it talks to Garnet as to Redis.
@@ -611,9 +638,80 @@ begin
   if not LoadStringsFromFile(GarnetConf, Conf) then
     SetArrayLength(Conf, 0);
   if (CachePw = '') or (GarnetPassword(Conf) <> CachePw) then
-    SuppressibleMsgBox('The cache server password was not set up: application.properties and ' +
-      'garnet.conf do not agree, so nobody will be able to sign in. ' + Fix,
-      mbCriticalError, MB_OK, IDOK);
+    Result := 'the cache server password was not set up (application.properties and garnet.conf do not agree)';
+end;
+
+// Retry until the secrets are in place. Cancel (also the answer in a silent install) leaves HMS stopped
+// rather than running it on a fallback password, which hms-service.xml no longer carries (OP8).
+procedure CheckSecretsWritten;
+var
+  Problem: String;
+  Code: Integer;
+begin
+  Problem := SecretsProblem;
+  while Problem <> '' do
+  begin
+    if SuppressibleMsgBox('Setup couldn''t secure the database: ' + Problem + '.' + #13#10#13#10 +
+         'Click Retry to try again. Cancel finishes without starting HMS; run this installer again to finish.',
+         mbError, MB_RETRYCANCEL, IDCANCEL) <> IDRETRY then
+    begin
+      SecretsFailed := True;
+      Exit;
+    end;
+    SaveAdminFiles;
+    Exec('powershell.exe', WriteSecretsParams(''), '', SW_HIDE, ewWaitUntilTerminated, Code);
+    Problem := SecretsProblem;
+  end;
+end;
+
+function DatabaseSetupLog: String;
+begin
+  Result := ExpandConstant('{app}\backend\logs\database-setup.log');
+end;
+
+// setup-database.bat rewrites its log on every run; BoxDatabaseSetup ends it with "Database ready:"
+// only when the migrations and the accounts are done.
+function DatabaseIsSetUp: Boolean;
+var
+  Lines: TArrayOfString;
+  I: Integer;
+begin
+  Result := False;
+  if LoadStringsFromFile(DatabaseSetupLog, Lines) then
+    for I := 0 to GetArrayLength(Lines) - 1 do
+      if Pos('Database ready:', Lines[I]) = 1 then
+        Result := True;
+end;
+
+// The backend would refuse to start on a database this release has not migrated, and its account
+// cannot migrate it (OP1), so the same Retry as for the secrets.
+procedure CheckDatabaseSetUp;
+var
+  Code: Integer;
+begin
+  while not DatabaseIsSetUp do
+  begin
+    if SuppressibleMsgBox('Setup couldn''t update the hospital database, so HMS was not started. The ' +
+         'details are in ' + DatabaseSetupLog + '.' + #13#10#13#10 +
+         'Click Retry to try again. Cancel finishes without starting HMS; run this installer again, or send ' +
+         'that file to Vyaptek.', mbError, MB_RETRYCANCEL, IDCANCEL) <> IDRETRY then
+    begin
+      DatabaseFailed := True;
+      Exit;
+    end;
+    Exec(ExpandConstant('{cmd}'), '/C ""' + ExpandConstant('{app}\setup-database.bat') + '" "' +
+      ExpandConstant('{app}') + '""', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  end;
+end;
+
+function SecretsReady: Boolean;
+begin
+  Result := not SecretsFailed;
+end;
+
+function DatabaseReady: Boolean;
+begin
+  Result := not SecretsFailed and not DatabaseFailed;
 end;
 
 // The .NET runtime Garnet needs: install the bundled one unless this computer already has the same
@@ -771,6 +869,15 @@ Source: "setup_database.sql"; DestDir: "{app}"
 Source: "init_db.bat";        DestDir: "{app}"; Flags: deleteafterinstall
 Source: "clean_db.bat";       DestDir: "{app}"; Flags: deleteafterinstall
 Source: "free-port-80.bat";   DestDir: "{app}"
+;    Migrates the database and sets the backend's accounts, as the superuser (plan 24 §11, OP1).
+Source: "setup-database.bat"; DestDir: "{app}"
+;    Support without manual steps (OP1, OP8): a 4-hour pgAdmin login, and Vyaptek-signed one-box fixes.
+;    Both ask for administrator rights; only Administrators can read the superuser's password.
+Source: "HMS-DB-Support.bat"; DestDir: "{app}"
+Source: "hms-db-support.ps1"; DestDir: "{app}"
+Source: "Run-HMS-Fix.bat";    DestDir: "{app}"
+Source: "run-hms-fix.ps1";    DestDir: "{app}"
+Source: "fix-signing-key.xml"; DestDir: "{app}"
 
 ; 3. Backend (Spring Boot JAR + WinSW)
 ;    Never ship backend\config: it holds each box's own secrets, and copying one over an install
@@ -827,18 +934,17 @@ Name: "{commonprograms}\Vyaptek HMS"; Filename: "http://localhost/"; IconFilenam
 Filename: "{tmp}\pg.exe"; Parameters: "--mode unattended --unattendedmodeui none --superpassword ""admin"" --serverport 5432 --prefix ""{app}\pgsql"""; Flags: runhidden; StatusMsg: "Installing PostgreSQL 18..."; Check: ShouldInstallPG
 
 ; 2a. Clean install — drop existing DB, recreate, run SQL
-Filename: "{app}\clean_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"" ""{app}\backend\config\application.properties"""; Flags: runhidden; StatusMsg: "Resetting database..."; Check: ShouldCleanDB
+Filename: "{app}\clean_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"" ""{app}\backend\config"""; Flags: runhidden; StatusMsg: "Resetting database..."; Check: ShouldCleanDB
 
 ; 2b. Fresh install only — create DB and run setup SQL (skipped on upgrades)
-Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"" ""{app}\backend\config\application.properties"""; Flags: runhidden; StatusMsg: "Initializing database..."; Check: ShouldInitDB
+Filename: "{app}\init_db.bat"; Parameters: """{app}\pgsql\bin"" ""{app}\setup_database.sql"" ""{app}\backend\config"""; Flags: runhidden; StatusMsg: "Initializing database..."; Check: ShouldInitDB
 
 ; 3. The box's own secrets (backend plan 24, C2, C6, I3): the sign-in key (kept on upgrade; a box that
 ;    never had one gets one, which logs everyone out once), the admin password on a new database, a
-;    random PostgreSQL superuser password instead of "admin" (again when the database is new) and a
-;    cache (Garnet) password with Garnet's whole config. Before Garnet is (re)registered, so it starts
-;    with its password.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -AdminPasswordFile ""{tmp}\admin-password.txt"" -AdminEmailFile ""{tmp}\admin-email.txt"" -PgBin ""{app}\pgsql\bin"" -GarnetConf ""{app}\garnet\garnet.conf"" -NewDatabase"; Flags: runhidden waituntilterminated; StatusMsg: "Generating this computer's keys..."; Check: NeedsAdminPassword; AfterInstall: CheckSecretsWritten
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\write-secrets.ps1"" -ConfigDir ""{app}\backend\config"" -PgBin ""{app}\pgsql\bin"" -GarnetConf ""{app}\garnet\garnet.conf"""; Flags: runhidden waituntilterminated; StatusMsg: "Checking this computer's keys..."; Check: KeepsDatabase; AfterInstall: CheckSecretsWritten
+;    random PostgreSQL superuser password instead of "admin" (again when the database is new), kept in
+;    pg-superuser.secret, the backend's own database accounts (OP1) and a cache (Garnet) password with
+;    Garnet's whole config. Before Garnet is (re)registered, so it starts with its password.
+Filename: "powershell.exe"; Parameters: "{code:WriteSecretsParams}"; Flags: runhidden waituntilterminated; StatusMsg: "Securing this computer's keys and database accounts..."; AfterInstall: CheckSecretsWritten
 
 ; 3a. The product key, when one was entered: into the locked config folder from step 3, for the backend
 ;     to activate at its first start (it then deletes the file and writes license-activated).
@@ -862,21 +968,27 @@ Filename: "{app}\garnet\garnet-install.bat"; Parameters: """{app}\garnet"""; Fla
 ;    REGISTER_NO_MSO_TYPES=1 leaves .docx/.xlsx opening in MS Office on PCs that have it.
 Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\libreoffice.msi"" /qn /norestart ADDLOCAL=ALL REMOVE=gm_o_Onlineupdate REGISTER_NO_MSO_TYPES=1 QUICKSTART=0 ISCHECKFORPRODUCTUPDATES=0 CREATEDESKTOPLINK=0 RebootYesNo=No UI_LANGS=en_US"; Flags: runhidden; StatusMsg: "Installing LibreOffice (PDF reports)..."; Check: ShouldInstallLibreOffice
 
-; 6. Backend — Flyway migrates on first boot (may take ~30s on first install)
+; 6. The database: this release's migrations and the backend's accounts, as the superuser (OP1). The
+;    backend's own account cannot change the schema, so this runs before it starts, on every run.
+Filename: "{app}\setup-database.bat"; Parameters: """{app}"""; Flags: runhidden waituntilterminated; StatusMsg: "Updating the hospital database..."; Check: SecretsReady; AfterInstall: CheckDatabaseSetUp
+;    Support logins (HMS-DB-Support.bat) whose 4 hours are over: they can no longer sign in; this removes them.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\hms-db-support.ps1"" -CleanupOnly"; Flags: runhidden waituntilterminated; StatusMsg: "Updating the hospital database..."; Check: DatabaseReady
+
+; 7. Backend
 Filename: "{app}\backend\hms-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
 ;    On every run: WinSW does not update an existing service, so a box upgraded from Redis would
 ;    otherwise keep waiting on the removed VyaptekRedis and the backend would never start.
 Filename: "{sys}\sc.exe"; Parameters: "config VyaptekHMS depend= postgresql-x64-18/VyaptekGarnet"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
-Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."
+Filename: "{app}\backend\hms-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting Backend API..."; Check: DatabaseReady
 
-; 7. Nginx + React frontend
+; 8. Nginx + React frontend
 ;    Free port 80 first -- stop & disable the IIS/HTTP stack (W3SVC/WAS) that
 ;    otherwise squats on port 80 and prevents Nginx from binding.
 Filename: "{app}\free-port-80.bat"; Flags: runhidden; StatusMsg: "Freeing web port 80..."
 Filename: "{app}\nginx-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Web Server..."
 Filename: "{app}\nginx-service.exe"; Parameters: "start";   Flags: runhidden; StatusMsg: "Starting User Interface..."
 
-; 8. Firewall — port 80 only (Garnet 6379 and backend 8080 listen on 127.0.0.1 only; PG 5432: plan 24 OP7)
+; 9. Firewall — port 80 only (Garnet 6379 and backend 8080 listen on 127.0.0.1 only; PG 5432: plan 24 OP7)
 Filename: "{cmd}"; Parameters: "/c ""netsh advfirewall firewall add rule name=""Vyaptek HMS Web"" dir=in action=allow protocol=TCP localport=80 profile=any"""; Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
 
 [UninstallRun]
