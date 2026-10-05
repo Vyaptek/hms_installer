@@ -310,8 +310,11 @@ jobs:
       - name: Hash the installer
         id: hash
         run: |
-          $h = (Get-FileHash output\HMSSetup.exe -Algorithm SHA256).Hash.ToLower()
+          # hms.iss names the file HMSSetup-v<AppVersion>.exe; AppVersion is the tag without its "v".
+          $setup = "HMSSetup-v$("${{ steps.ver.outputs.VERSION }}".TrimStart('v')).exe"
+          $h = (Get-FileHash "output\$setup" -Algorithm SHA256).Hash.ToLower()
           Add-Content -Path $env:GITHUB_OUTPUT -Value "SHA256=$h"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "SETUP=$setup"
 
       # ── Publish to GitHub Releases ────────────────────────────────────────
 
@@ -325,9 +328,9 @@ jobs:
             - hospital_management_backend `${{ steps.refs.outputs.BACKEND }}` (`${{ steps.shas.outputs.BACKEND_SHA }}`)
             - hms_webapp `${{ steps.refs.outputs.FRONTEND }}` (`${{ steps.shas.outputs.FRONTEND_SHA }}`)
             - hms_installer `${{ steps.shas.outputs.INSTALLER_SHA }}`
-            - HMSSetup.exe SHA-256 `${{ steps.hash.outputs.SHA256 }}`
+            - ${{ steps.hash.outputs.SETUP }} SHA-256 `${{ steps.hash.outputs.SHA256 }}`
             - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, age ${{ env.AGE_VERSION }}, PostgreSQL ${{ env.PG_VERSION }}
             - Software bill of materials (CycloneDX 1.6): sbom-backend, sbom-frontend, sbom-bundled
           files: |
-            output\HMSSetup.exe
+            output\${{ steps.hash.outputs.SETUP }}
             output\sbom-*.cdx.json

@@ -41,7 +41,7 @@ VersionInfoProductTextVersion={#AppVersion}
 AppPublisher=Vyaptek
 DefaultDirName={autopf}\Vyaptek\HMS
 OutputDir=userdocs:InnoSetupOutput
-OutputBaseFilename=HMSSetup
+OutputBaseFilename=HMSSetup-v{#AppVersion}
 PrivilegesRequired=admin
 MinVersion=10.0
 CloseApplications=yes
@@ -1047,15 +1047,56 @@ begin
       '). Nothing was changed. Send this message to Vyaptek.';
 end;
 
+// Stops a service and waits until it reports Stopped. True when it did, or when it is not installed.
+// sc.exe stop only sends the request and returns while the service is still stopping, and Windows
+// refuses it outright (1051) while a service that depends on it is still running. VyaptekHMS depends on
+// VyaptekGarnet, so Garnet's stop went out while the backend was still stopping, was refused, and
+// GarnetServer.exe was still running when [Files] came to replace it ("Skip this file").
+// ServiceController.Stop() stops the dependents first; WinSW kills its process after 15 s by default.
+function StopServiceAndWait(const Name: String): Boolean;
+var
+  Code: Integer;
+begin
+  Result := Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -Command "' +
+    '$s = Get-Service -Name ''' + Name + ''' -ErrorAction SilentlyContinue; if (-not $s) { exit 0 }; ' +
+    'if ($s.Status -notin ''Stopped'', ''StopPending'') { try { $s.Stop() } catch {} }; ' +
+    'try { $s.WaitForStatus(''Stopped'', ''00:01:00''); exit 0 } catch { exit 1 }"',
+    '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+end;
+
+// Stops HMS's services, dependents first, so their files can be replaced. '' when all stopped, else
+// why not. PostgreSQL stays up: the backup needs it.
+function StopHMSServices: String;
+var
+  Names: TArrayOfString;
+  I: Integer;
+begin
+  Result := '';
+  WizardForm.PreparingLabel.Caption := 'Stopping HMS...';
+  WizardForm.PreparingLabel.Visible := True;
+  // VyaptekRedis: boxes installed before Garnet; garnet-install.bat removes it once Garnet is in place.
+  SetArrayLength(Names, 4);
+  Names[0] := 'VyaptekHMS';
+  Names[1] := 'NginxWebProxy';
+  Names[2] := 'VyaptekGarnet';
+  Names[3] := 'VyaptekRedis';
+  for I := 0 to GetArrayLength(Names) - 1 do
+    if not StopServiceAndWait(Names[I]) then
+    begin
+      Result := 'Setup couldn''t stop the ' + Names[I] + ' service, so its files could not be replaced. ' +
+        'Nothing was changed. Restart the computer and run setup again; if this happens again, send this ' +
+        'message to Vyaptek.';
+      Exit;
+    end;
+  // The process can hold its files for a moment after the service reports Stopped.
+  Sleep(2000);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  Exec('sc.exe', 'stop VyaptekHMS',    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('sc.exe', 'stop NginxWebProxy', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('sc.exe', 'stop VyaptekGarnet', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  // Boxes installed before Garnet: garnet-install.bat removes the service once Garnet is in place.
-  Exec('sc.exe', 'stop VyaptekRedis',  '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Sleep(3000);
-  Result := BackupBeforeUpgrade;
+  Result := StopHMSServices;
+  if Result = '' then
+    Result := BackupBeforeUpgrade;
   // Cancelled: start HMS again as it was, since nothing was replaced.
   if Result <> '' then
   begin
