@@ -1276,13 +1276,16 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Fil
 
 ; 7. Register the backend and nginx, then run each as its own account (OP2) before either starts.
 Filename: "{app}\backend\hms-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
-;    On every run: WinSW does not update an existing service, so a box upgraded from Redis would
-;    otherwise keep waiting on the removed VyaptekRedis and the backend would never start.
-Filename: "{sys}\sc.exe"; Parameters: "config VyaptekHMS depend= postgresql-x64-18/VyaptekGarnet"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
+;    On every run: "install" fails on a service that already exists, and the XMLs turn WinSW's own
+;    refresh-at-start off (the service accounts cannot do it), so apply them here, as an administrator.
+;    Without this a box upgraded from Redis would keep waiting on the removed VyaptekRedis and the backend
+;    would never start. "refresh" leaves the account alone (service-accounts.ps1 sets it below).
+Filename: "{app}\backend\hms-service.exe"; Parameters: "refresh"; Flags: runhidden; StatusMsg: "Registering Backend Service..."
 ;    Free port 80 first -- stop & disable the IIS/HTTP stack (W3SVC/WAS) that
 ;    otherwise squats on port 80 and prevents Nginx from binding.
 Filename: "{app}\free-port-80.bat"; Flags: runhidden; StatusMsg: "Freeing web port 80..."
 Filename: "{app}\nginx-service.exe"; Parameters: "install"; Flags: runhidden; StatusMsg: "Registering Web Server..."
+Filename: "{app}\nginx-service.exe"; Parameters: "refresh"; Flags: runhidden; StatusMsg: "Registering Web Server..."
 ;    Their own Windows accounts and folders; the uploads move from C:\data\uploads once (OP3).
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\service-accounts.ps1"" -AppDir ""{app}"" -LogFile ""{app}\backend\logs\service-accounts.log"""; Flags: runhidden waituntilterminated; StatusMsg: "Setting up the HMS service accounts..."; AfterInstall: CheckServiceAccounts
 ;    HTTPS (OP5): this computer's certificate, trusted on this computer, nginx switched to HTTPS, and the

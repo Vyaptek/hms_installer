@@ -8,6 +8,10 @@
   <arguments>--config-import-path "%BASE%\garnet.conf"</arguments>
   <workingdirectory>%BASE%</workingdirectory>
   <startmode>Automatic</startmode>
+  <!-- Off, as for the backend and nginx: with it on, WinSW re-applies this file at start whenever it is
+       newer than the service's registry entry, opening its own service with full access, which Network
+       Service does not have. garnet-install.bat re-registers the service on every run instead. -->
+  <autoRefresh>false</autoRefresh>
 
   <onfailure action="restart" delay="10 sec"/>
   <onfailure action="restart" delay="20 sec"/>

@@ -12,6 +12,11 @@
   <!-- Start slightly after boot so the IIS/HTTP stack has settled and freed port 80. -->
   <startmode>Automatic</startmode>
   <delayedAutoStart>true</delayedAutoStart>
+  <!-- Off: with it on, WinSW re-applies this file at start whenever it is newer than the service's
+       registry entry, opening its own service with full access, which NT SERVICE\NginxWebProxy does
+       not have ("Failed to open the service. Access is denied", error 1053). hms.iss runs
+       "nginx-service.exe refresh" as an administrator instead. -->
+  <autoRefresh>false</autoRefresh>
 
   <!-- If nginx can't bind port 80 yet, retry instead of failing for good. -->
   <onfailure action="restart" delay="10 sec"/>

@@ -12,10 +12,16 @@
        write-secrets.ps1) relative to the working directory, so pin it to this folder. -->
   <workingdirectory>%BASE%</workingdirectory>
   <startmode>Automatic</startmode>
+  <!-- Off: with it on, WinSW re-applies this file whenever it is newer than the service's registry
+       entry, at every start, and to do that it opens its own service with full access. The service's
+       own account (NT SERVICE\VyaptekHMS) has no such access, so every start failed: "Failed to open
+       the service. Access is denied", error 1053. hms.iss runs "hms-service.exe refresh" as an
+       administrator instead. -->
+  <autoRefresh>false</autoRefresh>
 
   <!-- Wait for PostgreSQL and the cache server (Garnet) before starting. The EDB installer registers
-       PostgreSQL 18 as "postgresql-x64-18" on 64-bit Windows by default. WinSW applies these only
-       when it creates the service, so hms.iss also sets them with sc config on every run. -->
+       PostgreSQL 18 as "postgresql-x64-18" on 64-bit Windows by default. "install" applies these only
+       when it creates the service; hms.iss runs "refresh" on every run for one that already exists. -->
   <depend>postgresql-x64-18</depend>
   <depend>VyaptekGarnet</depend>
 
