@@ -16,9 +16,9 @@
     old fixed one to a random one, once, and again with -NewDatabase (this run created the database).
     Administrators only. A box set up before plan 24 OP1 had it as spring.datasource.password; it is
     moved here. If the change fails the script fails: there is no fallback password (OP8).
-  - spring.datasource.* and reporting.datasource.* (with -PgBin): the backend's own accounts,
-    hospital_erp_user and hms_reporting, with random passwords created once. setup-database.bat sets
-    them in the database.
+  - spring.datasource.* (with -PgBin): the backend's own account, hospital_erp_user, with a random
+    password created once. setup-database.bat sets it in the database. reporting.datasource.* (the
+    hms_reporting account of the report engine, removed in backend D44) is dropped from older files.
   - spring.data.redis.password: with -GarnetConf, a random password for the cache server (Garnet), created
     once, and Garnet's whole config written with it. Restart VyaptekGarnet afterwards (the installer
     re-registers the service right after this script).
@@ -74,7 +74,7 @@ if (Get-ChildItem -Force -File $ConfigDir) {
 
 $lines = @()
 if (Test-Path $file) {
-  $lines = @(Get-Content $file | Where-Object { $_ -notmatch '^hms\.bootstrap\.admin-(password|username)=' })
+  $lines = @(Get-Content $file | Where-Object { $_ -notmatch '^(hms\.bootstrap\.admin-(password|username)|reporting\.datasource\.[a-z.-]+)=' })
 }
 if (-not (Get-Prop $lines 'security.jwt.secret')) {
   $bytes = New-Object byte[] 48
@@ -151,15 +151,11 @@ if ($PgBin) {
     Protect-Superuser
   }
 
-  # The backend's own accounts (OP1). setup-database.bat gives them these passwords in the database
-  # on every run, so a new password here needs nothing else.
-  foreach ($account in @(
-      @{ Prefix = 'spring.datasource'; User = 'hospital_erp_user' },
-      @{ Prefix = 'reporting.datasource'; User = 'hms_reporting' })) {
-    if ((Get-Prop $lines "$($account.Prefix).username") -ne $account.User -or -not (Get-Prop $lines "$($account.Prefix).password")) {
-      $lines = Set-Prop $lines "$($account.Prefix).username" $account.User
-      $lines = Set-Prop $lines "$($account.Prefix).password" (New-Secret 24)
-    }
+  # The backend's own account (OP1). setup-database.bat gives it this password in the database on
+  # every run, so a new password here needs nothing else.
+  if ((Get-Prop $lines 'spring.datasource.username') -ne 'hospital_erp_user' -or -not (Get-Prop $lines 'spring.datasource.password')) {
+    $lines = Set-Prop $lines 'spring.datasource.username' 'hospital_erp_user'
+    $lines = Set-Prop $lines 'spring.datasource.password' (New-Secret 24)
   }
 }
 

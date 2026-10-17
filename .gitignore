@@ -3,7 +3,6 @@ backend/config/
 jre/
 pg.exe
 java.msi
-libreoffice.msi
 dotnet-runtime.exe
 age/
 garnet/bin/

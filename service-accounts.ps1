@@ -7,8 +7,8 @@
   Accounts: virtual service accounts, which Windows manages itself (no password, nothing to rotate).
     VyaptekHMS     -> NT SERVICE\VyaptekHMS
     NginxWebProxy  -> NT SERVICE\NginxWebProxy
-  Both are members of Users, so they read Program Files (the jar, the Java runtime, LibreOffice, nginx's
-  html and conf) as before. Garnet already ran as Network Service (OP4).
+  Both are members of Users, so they read Program Files (the jar, the Java runtime, nginx's html and
+  conf) as before. Garnet already ran as Network Service (OP4).
 
   What the backend writes, and nothing else:
     backend\config      the ABDM token rotation and the license marker rewrite files here. Modify, not
@@ -16,8 +16,7 @@
                         and the backend can neither read nor delete it.
     backend\logs        WinSW's logs.
     %ProgramData%\Vyaptek\HMS\uploads   uploaded report files (FILE_STORAGE_DIR in hms-service.xml).
-    %ProgramData%\Vyaptek\HMS\temp      java.io.tmpdir (hms-service.xml), which also holds LibreOffice's
-                                        per-process profiles (JODConverter puts them under the temp folder).
+    %ProgramData%\Vyaptek\HMS\temp      java.io.tmpdir (hms-service.xml).
   nginx writes its logs and temp folders only.
 
   The two ProgramData folders and backend\logs lose the entries they inherited (a folder under C:\ or

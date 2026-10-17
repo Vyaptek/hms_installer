@@ -1,11 +1,7 @@
-; Set by the CI workflow (/DAppVersion, /DLibreOfficeVersion, /DDotNetVersion); these defaults are for
+; Set by the CI workflow (/DAppVersion, /DDotNetVersion); these defaults are for
 ; local builds.
 #ifndef AppVersion
   #define AppVersion "0.0.0-local"
-#endif
-; The bundled libreoffice.msi's version, as soffice.exe reports it.
-#ifndef LibreOfficeVersion
-  #define LibreOfficeVersion "26.2.6.3"
 #endif
 ; The bundled .NET runtime's version (dotnet-runtime.exe), which Garnet, the cache server, runs on.
 #ifndef DotNetVersion
@@ -65,7 +61,6 @@ var
   PGVersion: String;
   // Shown on the last page: the PostgreSQL update, and the backup before the upgrade (OP11).
   PGPatchResult, BackupResult: String;
-  LibreOfficeChecked, LibreOfficeNeeded: Boolean;
   DotNetChecked, DotNetNeeded: Boolean;
   // Set when the person gave up on Retry: the box's secrets, or the database update, are missing, so
   // the backend is not started (plan 24 §11, OP8: there is no fallback password any more).
@@ -941,26 +936,6 @@ begin
   SaveStringToFile(ExpandConstant('{app}\nginx\conf\server-names.conf'), Line, False);
 end;
 
-// The backend turns reports into PDF with LibreOffice (backend optimization/21). Install the bundled
-// one when the box has none or an older one; a newer one the hospital installed is left alone.
-// Worked out once, because [Files] and [Run] both ask and [Run] comes after the copy.
-function ShouldInstallLibreOffice: Boolean;
-var
-  Installed: String;
-  InstalledPacked, BundledPacked: Int64;
-begin
-  if not LibreOfficeChecked then
-  begin
-    LibreOfficeNeeded := True;
-    if GetVersionNumbersString(ExpandConstant('{commonpf64}\LibreOffice\program\soffice.exe'), Installed) and
-       StrToVersion(Installed, InstalledPacked) and
-       StrToVersion('{#LibreOfficeVersion}', BundledPacked) then
-      LibreOfficeNeeded := ComparePackedVersion(InstalledPacked, BundledPacked) < 0;
-    LibreOfficeChecked := True;
-  end;
-  Result := LibreOfficeNeeded;
-end;
-
 // The path a browser registered under App Paths, or '' when it is not installed for all users.
 function RegisteredExe(const Exe: String): String;
 var
@@ -1128,7 +1103,6 @@ Type: filesandordirs; Name: "{app}\redis"
 Source: "jre\*"; DestDir: "{app}\jre"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 ;    Installers — extracted to temp and deleted after use
-Source: "libreoffice.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall nocompression; Check: ShouldInstallLibreOffice
 Source: "pg.exe";   DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NeedsPgInstaller
 
 ; 2. Pre-flight SQL (extensions + role only — Flyway migrates on first backend start)
@@ -1261,9 +1235,8 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Fil
 Filename: "{tmp}\dotnet-runtime.exe"; Parameters: "/install /quiet /norestart"; Flags: runhidden waituntilterminated; StatusMsg: "Installing the .NET runtime (cache server)..."; Check: ShouldInstallDotNet
 Filename: "{app}\garnet\garnet-install.bat"; Parameters: """{app}\garnet"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering and starting the cache server..."
  
-; 5. LibreOffice, for PDF reports. Without it the backend still runs, but every PDF fails.
-;    REGISTER_NO_MSO_TYPES=1 leaves .docx/.xlsx opening in MS Office on PCs that have it.
-Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\libreoffice.msi"" /qn /norestart ADDLOCAL=ALL REMOVE=gm_o_Onlineupdate REGISTER_NO_MSO_TYPES=1 QUICKSTART=0 ISCHECKFORPRODUCTUPDATES=0 CREATEDESKTOPLINK=0 RebootYesNo=No UI_LANGS=en_US"; Flags: runhidden; StatusMsg: "Installing LibreOffice (PDF reports)..."; Check: ShouldInstallLibreOffice
+; 5. (LibreOffice was installed here for the backend's PDF reports. The report engine was removed in
+;    backend D44, 2026-10-16; a copy an earlier release installed is left alone, as the hospital may use it.)
 
 ; 6. PostgreSQL listens on this computer only and takes SCRAM passwords only (OP7), before anything
 ;    signs in to it below.

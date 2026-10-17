@@ -22,9 +22,8 @@ on:
 # builds backend and frontend tag vX.Y.Z, so tag all three repositories together.
 
 # Bundled third-party binaries, pinned by version and SHA-256 so a rebuild of the same tag ships the
-# same bytes. Refresh each quarter (Temurin: https://adoptium.net/temurin/releases/, LibreOffice:
-# https://www.libreoffice.org/download/release-notes/, Garnet: https://github.com/microsoft/garnet/releases,
-# .NET: https://dotnet.microsoft.com/download/dotnet/10.0).
+# same bytes. Refresh each quarter (Temurin: https://adoptium.net/temurin/releases/,
+# Garnet: https://github.com/microsoft/garnet/releases, .NET: https://dotnet.microsoft.com/download/dotnet/10.0).
 env:
   # PostgreSQL, the EDB Windows installer (hms.iss runs it silently). PG_VERSION is major.minor and is
   # what hms.iss compares with an installed copy; the exe's own version fields carry no minor.
@@ -35,11 +34,6 @@ env:
   JRE_VERSION: 25.0.4.1+1
   JRE_URL: https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jre_x64_windows_hotspot_25.0.4.1_1.zip
   JRE_SHA256: 4c95451cea98556def2c54f7782933f52a26d4a36bd85e1d59f0364464828b07
-  # LibreOffice, which turns reports into PDF. The archive URL outlives the release's place in
-  # /stable/. LO_VERSION is what soffice.exe reports; hms.iss compares it with an installed copy.
-  LO_VERSION: 26.2.6.3
-  LO_URL: https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.6.3/win/x86_64/LibreOffice_26.2.6.3_Win_x86-64.msi
-  LO_SHA256: f9877032fd908beb9c0ddf06df4af5c2e85f419c42e14876c4cce5aae5fb2660
   # Garnet, the box's cache server (sessions), in place of the archived Windows Redis port (backend
   # plan 24 §11, OP4). The zip's net10.0 build, which needs the .NET runtime below.
   GARNET_VERSION: 2.2.0
@@ -161,7 +155,7 @@ jobs:
 
       # ── Download the pinned binaries ─────────────────────────────────────
 
-      - name: Download PostgreSQL, Java runtime, LibreOffice, Garnet and the .NET runtime
+      - name: Download PostgreSQL, Java runtime, Garnet and the .NET runtime
         run: |
           function Get-Pinned([string]$url, [string]$sha256, [string]$out) {
             Invoke-WebRequest $url -OutFile $out
@@ -171,7 +165,6 @@ jobs:
           New-Item -ItemType Directory -Force deps | Out-Null
           Get-Pinned $env:PG_URL $env:PG_SHA256 deps\pg.exe
           Get-Pinned $env:JRE_URL $env:JRE_SHA256 deps\jre.zip
-          Get-Pinned $env:LO_URL $env:LO_SHA256 deps\libreoffice.msi
           Get-Pinned $env:GARNET_URL $env:GARNET_SHA256 deps\garnet.zip
           Get-Pinned $env:DOTNET_URL $env:DOTNET_SHA256 deps\dotnet-runtime.exe
           Get-Pinned $env:AGE_URL $env:AGE_SHA256 deps\age.zip
@@ -189,7 +182,6 @@ jobs:
 
           # Large binaries — now land next to hms.iss
           Copy-Item deps\pg.exe          $stage\
-          Copy-Item deps\libreoffice.msi $stage\
           Copy-Item deps\dotnet-runtime.exe $stage\
 
           # age: the two programs the backups use, not its plugins.
@@ -252,7 +244,6 @@ jobs:
           $nginxVersion = ((& "$stage\nginx\nginx.exe" -v 2>&1) -join ' ') -replace '.*nginx/', ''
           $components = @(
             (Component 'Eclipse Temurin JRE' $env:JRE_VERSION 'Eclipse Foundation' 'GPL-2.0-with-classpath-exception' $env:JRE_URL $env:JRE_SHA256),
-            (Component 'LibreOffice' $env:LO_VERSION 'The Document Foundation' 'MPL-2.0' $env:LO_URL $env:LO_SHA256),
             (Component 'Microsoft Garnet' $env:GARNET_VERSION 'Microsoft' 'MIT' $env:GARNET_URL $env:GARNET_SHA256),
             (Component '.NET Runtime' $env:DOTNET_VERSION 'Microsoft' 'MIT' $env:DOTNET_URL $env:DOTNET_SHA256),
             (Component 'age' $env:AGE_VERSION 'Filippo Valsorda' 'BSD-3-Clause' $env:AGE_URL $env:AGE_SHA256),
@@ -299,7 +290,6 @@ jobs:
           # Run the compiler using the discovered path
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
             /DAppVersion="$appVersion" `
-            /DLibreOfficeVersion="$env:LO_VERSION" `
             /DDotNetVersion="$env:DOTNET_VERSION" `
             /DPostgresVersion="$pgVersion" `
             /DAppReleaseDate="${{ steps.ver.outputs.RELEASE_DATE }}" `
@@ -329,7 +319,7 @@ jobs:
             - hms_webapp `${{ steps.refs.outputs.FRONTEND }}` (`${{ steps.shas.outputs.FRONTEND_SHA }}`)
             - hms_installer `${{ steps.shas.outputs.INSTALLER_SHA }}`
             - ${{ steps.hash.outputs.SETUP }} SHA-256 `${{ steps.hash.outputs.SHA256 }}`
-            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, LibreOffice ${{ env.LO_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, age ${{ env.AGE_VERSION }}, PostgreSQL ${{ env.PG_VERSION }}
+            - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, age ${{ env.AGE_VERSION }}, PostgreSQL ${{ env.PG_VERSION }}
             - Software bill of materials (CycloneDX 1.6): sbom-backend, sbom-frontend, sbom-bundled
           files: |
             output\${{ steps.hash.outputs.SETUP }}

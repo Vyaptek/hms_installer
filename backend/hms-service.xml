@@ -6,7 +6,7 @@
        PC later can change JAVA_HOME, and the backend is built for Java 25. -->
   <executable>%BASE%\..\jre\bin\java.exe</executable>
   <!-- java.io.tmpdir: a folder only this service (NT SERVICE\VyaptekHMS), SYSTEM and Administrators can
-       open, made by service-accounts.ps1. LibreOffice's per-process profiles go under it too. -->
+       open, made by service-accounts.ps1. -->
   <arguments>-Xmx512m -Djava.io.tmpdir="%ProgramData%\Vyaptek\HMS\temp" -jar "%BASE%\hms.jar"</arguments>
   <!-- Spring Boot reads config\application.properties (this box's secrets, written by
        write-secrets.ps1) relative to the working directory, so pin it to this folder. -->
