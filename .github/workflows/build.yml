@@ -215,6 +215,46 @@ jobs:
           New-Item -ItemType Directory -Force "$stage\frontend" | Out-Null
           Copy-Item "$frontendDir\dist\*" "$stage\frontend\" -Recurse
 
+      # ── Hash the shipped backend and frontend (WASA / CERT-In audit metadata) ──
+      # The audit sheet needs a hash per asset, not just the installer's. Both are taken from the
+      # staged files, i.e. exactly what hms.iss packs and installs:
+      #   backend  = SHA-256 of backend\hms.jar
+      #   frontend = SHA-256 over "<sha256>  <relative/path>\n" lines of every file in frontend\
+      #              (*.map excluded, as hms.iss excludes them), paths with "/", sorted ordinally.
+      # The frontend tree hash is reproducible on Linux with:
+      #   cd frontend && find . -type f ! -name '*.map' -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum
+      - name: Hash the backend and frontend
+        id: parts
+        run: |
+          $stage = "installer-repo"
+          $jar = (Get-FileHash "$stage\backend\hms.jar" -Algorithm SHA256).Hash.ToLower()
+
+          $root = (Resolve-Path "$stage\frontend").Path.TrimEnd('\')
+          $rel = [string[]](Get-ChildItem $root -Recurse -File | Where-Object { $_.Extension -ne '.map' } |
+                   ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\', '/') })
+          [Array]::Sort($rel, [StringComparer]::Ordinal)
+          $sb = New-Object System.Text.StringBuilder
+          foreach ($p in $rel) {
+            $h = (Get-FileHash (Join-Path $root $p) -Algorithm SHA256).Hash.ToLower()
+            [void]$sb.Append("$h  $p`n")
+          }
+          $sha = [Security.Cryptography.SHA256]::Create()
+          $fe = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sb.ToString())) | ForEach-Object { $_.ToString('x2') })
+
+          New-Item -ItemType Directory -Force output | Out-Null
+          $ver = "${{ steps.ver.outputs.VERSION }}"
+          Set-Content -Encoding ascii -NoNewline output\component-hashes.txt -Value (
+            "$jar  hms-backend-$ver.jar (backend\hms.jar)`n" +
+            "$fe  hms-webapp-$ver (frontend\ tree hash, $($rel.Count) files)`n")
+          Set-Content -Encoding ascii -NoNewline output\frontend-files.sha256 -Value $sb.ToString()
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "BACKEND_JAR_SHA256=$jar"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "FRONTEND_SHA256=$fe"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "FRONTEND_FILES=$($rel.Count)"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### Component hashes ($ver)`n- Backend ``hms.jar``: ``$jar```n- Frontend tree ($($rel.Count) files): ``$fe``"
+          Write-Host "backend hms.jar  $jar"
+          Write-Host "frontend tree    $fe ($($rel.Count) files)"
+
       # ── Software bill of materials (backend plan 24 §11, OP10) ────────────
       # CycloneDX 1.6, one file per part, attached to the release: the backend jar's (the Gradle plugin,
       # runtime classpath; Spring Boot also packs it into the jar), the frontend's npm packages without
@@ -319,8 +359,12 @@ jobs:
             - hms_webapp `${{ steps.refs.outputs.FRONTEND }}` (`${{ steps.shas.outputs.FRONTEND_SHA }}`)
             - hms_installer `${{ steps.shas.outputs.INSTALLER_SHA }}`
             - ${{ steps.hash.outputs.SETUP }} SHA-256 `${{ steps.hash.outputs.SHA256 }}`
+            - Backend `hms.jar` SHA-256 `${{ steps.parts.outputs.BACKEND_JAR_SHA256 }}`
+            - Frontend tree SHA-256 `${{ steps.parts.outputs.FRONTEND_SHA256 }}` (${{ steps.parts.outputs.FRONTEND_FILES }} files; per-file list in frontend-files.sha256)
             - Bundled: Temurin JRE ${{ env.JRE_VERSION }}, Garnet ${{ env.GARNET_VERSION }}, .NET runtime ${{ env.DOTNET_VERSION }}, age ${{ env.AGE_VERSION }}, PostgreSQL ${{ env.PG_VERSION }}
             - Software bill of materials (CycloneDX 1.6): sbom-backend, sbom-frontend, sbom-bundled
           files: |
             output\${{ steps.hash.outputs.SETUP }}
             output\sbom-*.cdx.json
+            output\component-hashes.txt
+            output\frontend-files.sha256
